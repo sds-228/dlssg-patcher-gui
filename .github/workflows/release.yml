@@ -1,0 +1,44 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    # GitHub-hosted Windows runner. To go back to the local self-hosted runner,
+    # replace this with: [self-hosted, Windows, X64]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release
+        # Use build-release.ps1, not a bare `cargo build`: it applies
+        # --remap-path-prefix so no C:\Users\<you> or cargo-registry paths are
+        # embedded in the exe, then self-checks and fails the build if any are.
+        # Needed on hosted Windows runners too: cargo lives in the user profile.
+        run: .\build-release.ps1
+
+      - name: Create release asset bundle
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item target\release\dlssg-patcher.exe dist\
+          Copy-Item games.json dist\
+          Copy-Item README.md dist\
+          Copy-Item LICENSE dist\
+          Get-ChildItem dist | Select-Object Name
+          Compress-Archive -Path dist\* -DestinationPath dlssg-patcher-windows.zip
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dlssg-patcher-windows.zip
+            target/release/dlssg-patcher.exe
