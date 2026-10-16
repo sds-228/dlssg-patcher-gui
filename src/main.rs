@@ -8,6 +8,7 @@ mod launchers;
 mod manifest;
 mod patcher;
 mod steam;
+mod winutil;
 
 use eframe::egui;
 

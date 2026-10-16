@@ -116,7 +116,7 @@ pub fn query_gpu() -> Result<GpuInfo, String> {
 }
 
 fn query_nvidia_smi() -> Result<GpuInfo, String> {
-    let out = std::process::Command::new("nvidia-smi")
+    let out = std::process::Command::new(crate::winutil::system32("nvidia-smi.exe"))
         .args(["--query-gpu=name,driver_version,memory.total", "--format=csv,noheader,nounits"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -207,7 +207,7 @@ fn run_powershell(script: &str) -> Result<String, String> {
     // Force UTF-8 stdout: Windows PowerShell 5.1 otherwise writes the OEM codepage,
     // which mangles non-ASCII adapter names.
     let script = format!("try {{ [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 }} catch {{}}; {script}");
-    let out = std::process::Command::new("powershell")
+    let out = std::process::Command::new(crate::winutil::system32("powershell.exe"))
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .creation_flags(CREATE_NO_WINDOW)
         .output()

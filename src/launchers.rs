@@ -85,7 +85,7 @@ fn dedup(games: &mut Vec<InstalledGame>) {
 /// `(subkey_path, [(value_name, value_data), …])`. Returns empty on any failure
 /// (missing key, no `reg.exe`) - callers treat that as "launcher not installed".
 fn reg_query_values(key: &str) -> Vec<(String, Vec<(String, String)>)> {
-    let out = match std::process::Command::new("reg")
+    let out = match std::process::Command::new(crate::winutil::system32("reg.exe"))
         .args(["query", key, "/s"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()

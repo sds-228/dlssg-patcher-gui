@@ -2010,7 +2010,7 @@ impl DlssgApp {
                                             if ui.add(egui::Button::new("Open dir").min_size(egui::vec2(w, btn_h))).clicked()
                                                 && row.install_dir.is_dir()
                                             {
-                                                let _ = std::process::Command::new("explorer").arg(&row.install_dir).spawn();
+                                                let _ = std::process::Command::new(crate::winutil::system32("explorer.exe")).arg(&row.install_dir).spawn();
                                             }
                                         }
                                         SecondSlot::Unpatch => {
@@ -2050,7 +2050,7 @@ impl DlssgApp {
                                     if ui.add(egui::Button::new("Open dir").min_size(egui::vec2(w, btn_h))).clicked()
                                         && row.install_dir.is_dir()
                                     {
-                                        let _ = std::process::Command::new("explorer").arg(&row.install_dir).spawn();
+                                        let _ = std::process::Command::new(crate::winutil::system32("explorer.exe")).arg(&row.install_dir).spawn();
                                     }
                                     if is_manual {
                                         if add_toned_button(ui, BtnTone::DangerOutline, "X", row_sz(x_w))

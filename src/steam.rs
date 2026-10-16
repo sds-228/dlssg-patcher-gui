@@ -32,7 +32,7 @@ pub(crate) fn parse_steam_path(reg_output: &str) -> Option<PathBuf> {
 /// Resolve the Steam installation path from the registry.
 /// Avoids extra crates by shelling out to `reg.exe`.
 pub fn steam_path_from_registry() -> Option<PathBuf> {
-    let out = std::process::Command::new("reg")
+    let out = std::process::Command::new(crate::winutil::system32("reg.exe"))
         .args(["query", r"HKCU\Software\Valve\Steam", "/v", "SteamPath"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
