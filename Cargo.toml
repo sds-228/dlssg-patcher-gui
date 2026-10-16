@@ -1,6 +1,6 @@
 [package]
 name = "dlssg-patcher"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Simple GUI for the dlssg_for_sm86 Frame Generation mod (RTX 20/30-series GPUs)"
 license = "MIT"

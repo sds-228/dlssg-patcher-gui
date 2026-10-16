@@ -6,6 +6,10 @@ use serde::Serialize;
 
 /// Upstream repo (`owner/name`) that ships the prebuilt proxy + INI files.
 const REPO: &str = "sdli1995/dlssg_for_sm86";
+
+/// Identifies the tool and its version on every network request, so upstream
+/// traffic is attributable to a specific release.
+const USER_AGENT: &str = concat!("dlssg-patcher/", env!("CARGO_PKG_VERSION"));
 /// `main` branch root, used by `resolve_tag` as a fallback when the GitHub API is
 /// unreachable.
 const RAW_BASE: &str = "https://raw.githubusercontent.com/sdli1995/dlssg_for_sm86/main/";
@@ -365,7 +369,7 @@ fn fetch_bytes_timeout(url: &str, global_secs: u64, connect_secs: u64) -> Result
         .new_agent();
     let mut resp = agent
         .get(url)
-        .header("User-Agent", "dlssg-patcher/0.1")
+        .header("User-Agent", USER_AGENT)
         .call()
         .map_err(|e| format!("HTTP error: {e}"))?;
     // Raise read_to_vec()'s default limit; the release payload is far larger.
@@ -465,7 +469,7 @@ fn fetch_zip_with_stall(
         .new_agent();
     let resp = agent
         .get(url)
-        .header("User-Agent", "dlssg-patcher/0.1")
+        .header("User-Agent", USER_AGENT)
         .call()
         .map_err(|e| format!("HTTP error: {e}"))?;
     // The headers are in hand before the body is touched, so the expected size can be named
@@ -1074,6 +1078,13 @@ pub fn extract_release_zip(bytes: &[u8], cache: &Path, include_sr: bool) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The User-Agent must track the crate version, so a release never ships
+    /// advertising the wrong one.
+    #[test]
+    fn user_agent_carries_the_crate_version() {
+        assert_eq!(USER_AGENT, concat!("dlssg-patcher/", env!("CARGO_PKG_VERSION")));
+    }
 
     /// A cached/bundled file is trusted without a network round-trip, so a bad
     /// file (an HTML error page saved as `version.dll`) must be detected here: a
