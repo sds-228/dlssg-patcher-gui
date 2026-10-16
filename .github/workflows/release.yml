@@ -37,18 +37,9 @@ jobs:
           Get-ChildItem dist | Select-Object Name
           Compress-Archive -Path dist\* -DestinationPath dlssg-patcher-windows.zip
 
-      - name: Write SHA256SUMS
-        run: |
-          $lines = Get-FileHash -Algorithm SHA256 target\release\dlssg-patcher.exe, dlssg-patcher-windows.zip |
-            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" }
-          $lines | Set-Content -Encoding ascii SHA256SUMS
-          Get-Content SHA256SUMS
-
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dlssg-patcher-windows.zip
             target/release/dlssg-patcher.exe
-            SHA256SUMS
-            THIRD-PARTY-LICENSES.txt
