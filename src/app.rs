@@ -382,13 +382,7 @@ impl DlssgApp {
             eprintln!("[dlssg-patcher] manifest error: {e}");
             load_manifest_from_empty()
         });
-        let state = match load_state() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[dlssg-patcher] state error: {e}");
-                State::default()
-            }
-        };
+        let (state, state_warning) = crate::manifest::load_state_recovering();
 
         let (tx, rx) = mpsc::channel();
         let mut app = DlssgApp {
@@ -420,6 +414,9 @@ impl DlssgApp {
             rows_dirty: true,
         };
         app.log("Started DLSSG Patcher".into());
+        if let Some(w) = state_warning {
+            app.log(w);
+        }
         app.refresh_gpu();
         app.refresh_files(false);
         app.scan_games();

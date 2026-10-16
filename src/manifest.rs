@@ -212,6 +212,53 @@ pub fn state_dir() -> Result<PathBuf, String> {
     Ok(base.join(STATE_FOLDER))
 }
 
+/// Sibling path a corrupt `state.json` is moved to, preserving its bytes.
+fn quarantine_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "state.json".to_string());
+    path.with_file_name(format!("{name}.corrupt-{}", unix_seconds()))
+}
+
+/// Load `state.json` at `path`, recovering from a corrupt file by moving it
+/// aside rather than overwriting the only record of the backup files.
+fn load_state_from(path: &Path) -> (State, Option<String>) {
+    if !path.is_file() {
+        return (State::default(), None);
+    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => return (State::default(), Some(format!("could not read {}: {e}", path.display()))),
+    };
+    match serde_json::from_str::<State>(&text) {
+        Ok(s) => (s, None),
+        Err(e) => {
+            let dest = quarantine_path(path);
+            let moved = std::fs::rename(path, &dest).is_ok();
+            let note = if moved {
+                let name = dest
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                format!("state.json was corrupt ({e}); moved it to {name}")
+            } else {
+                format!("state.json is corrupt ({e}) and could not be moved aside")
+            };
+            (State::default(), Some(note))
+        }
+    }
+}
+
+/// Load the persisted state, never failing: a corrupt or unreadable file yields
+/// the default state plus a message for the activity log.
+pub fn load_state_recovering() -> (State, Option<String>) {
+    match state_dir() {
+        Ok(d) => load_state_from(&d.join("state.json")),
+        Err(e) => (State::default(), Some(format!("app data directory unavailable: {e}"))),
+    }
+}
+
 pub fn load_state() -> Result<State, String> {
     let path = state_dir()?.join("state.json");
     if !path.is_file() {
@@ -300,6 +347,52 @@ mod tests {
             proxy_sha256: "abc".into(),
             mod_version: None,
         }
+    }
+
+    fn temp_state_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("manifest_state_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A corrupt `state.json` must never be silently replaced: the bytes are the
+    /// only record of the backup files needed to restore a patched game.
+    #[test]
+    fn corrupt_state_json_is_quarantined_not_overwritten() {
+        let dir = temp_state_dir("corrupt");
+        let path = dir.join("state.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+
+        let (state, warning) = load_state_from(&path);
+
+        assert!(state.patches.is_empty());
+        let w = warning.expect("a corrupt file must produce a warning");
+        assert!(w.contains("corrupt"), "{w}");
+        assert!(!path.exists(), "the original file must be moved aside");
+        let quarantined = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("state.json.corrupt-"))
+            .count();
+        assert_eq!(quarantined, 1, "exactly one quarantine file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_and_valid_state_json_load_quietly() {
+        let dir = temp_state_dir("quiet");
+        let path = dir.join("state.json");
+
+        let (state, warning) = load_state_from(&path);
+        assert!(warning.is_none(), "a missing file is not an error: {warning:?}");
+        assert!(state.patches.is_empty());
+
+        std::fs::write(&path, b"{}").unwrap();
+        let (_state, warning) = load_state_from(&path);
+        assert!(warning.is_none(), "a valid file is not an error: {warning:?}");
+        assert!(path.exists(), "a valid file is left in place");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Windows paths are case-insensitive, and a rescan can easily come back with a
