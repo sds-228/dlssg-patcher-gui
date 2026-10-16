@@ -367,16 +367,21 @@ impl SortMode {
 impl DlssgApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
-        let state_dir = crate::manifest::state_dir().expect("app data directory unavailable");
+        let state_dir = match crate::manifest::state_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_title("DLSSG Patcher")
+                    .set_description(format!(
+                        "Could not locate the application data directory:\n{e}\n\nThe tool cannot run without it."
+                    ))
+                    .show();
+                std::process::exit(1);
+            }
+        };
         let cache_root = state_dir.clone();
-        let mut local_dirs = Vec::new();
-        if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())) {
-            local_dirs.push(exe_dir.join("files"));
-        }
-        if let Ok(cwd) = std::env::current_dir() {
-            local_dirs.push(cwd.join("files"));
-        }
-        local_dirs.push(state_dir.join("files"));
+        let local_dirs = local_files_dirs(&state_dir);
 
         let (manifest, manifest_warning) = load_manifest_reporting();
         let (state, state_warning) = crate::manifest::load_state_recovering();
@@ -2855,6 +2860,13 @@ pub(crate) fn pick_proxy(
     default_proxy() // its one remaining caller: the resolver's documented last resort
 }
 
+/// Folders searched for user-supplied mod payloads. Only the app-data `files/`
+/// folder is trusted: an exe-dir or working-directory copy could be planted by
+/// anything with write access there, so those are not searched.
+fn local_files_dirs(state_dir: &Path) -> Vec<PathBuf> {
+    vec![state_dir.join("files")]
+}
+
 fn default_proxy() -> String {
     "version.dll".to_string()
 }
@@ -2862,6 +2874,16 @@ fn default_proxy() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the app-data `files/` folder is trusted; an exe-dir or CWD copy could
+    /// be planted by anything that can write there.
+    #[test]
+    fn local_files_dirs_is_app_data_only() {
+        assert_eq!(
+            local_files_dirs(Path::new(r"C:\data")),
+            vec![PathBuf::from(r"C:\data").join("files")]
+        );
+    }
 
     /// Regression guard for the games-table cursor. egui makes labels selectable
     /// by default and swaps the pointer to the text I-beam over a hovered label;
