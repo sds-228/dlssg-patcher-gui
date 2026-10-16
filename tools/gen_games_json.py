@@ -83,6 +83,21 @@ QUALIFIERS = frozenset((
 
 FUZZY_CUTOFF = 0.90
 
+# Kernel anti-cheat systems, keyed by their exact catalog name. Their files live
+# in System32 (ACE-*.sys, xhunter1.sys, and the like) rather than the game folder,
+# so the install-dir scan in the app can never see them; naming the system here is
+# the only reliable way to warn before patching a protected title. Verified in the
+# v0.1.1 hardening research pass, not scraped from NVIDIA.
+ANTICHEAT = {
+    "Battlefield 6": "Javelin",
+    "Delta Force": "Tencent ACE",
+    "Arena Breakout: Infinite": "Tencent ACE",
+    "Call of Duty: Black Ops 6": "Ricochet",
+    "Call of Duty: Black Ops 7": "Ricochet",
+    "Call of Duty: Modern Warfare III": "Ricochet",
+    "Call of Duty: Warzone (2022)": "Ricochet",
+}
+
 # Steam rate-limits bursts hard, so pace real requests.
 THROTTLE_SECONDS = 1.60
 _last_request = [0.0]
@@ -281,6 +296,8 @@ def main():
         appid, conf = resolve_appid(g["name"])
         stats[conf] += 1
         entry = {"name": g["name"], "fg": g["fg"]}
+        if g["name"] in ANTICHEAT:
+            entry["anticheat"] = ANTICHEAT[g["name"]]
 
         if appid:
             # Several NVIDIA rows can point at one Steam app (a base title and
@@ -306,7 +323,8 @@ def main():
             "tools/gen_games_json.py -- do not edit by hand. The presence of "
             "Frame Generation says the game ships the feature; it does not "
             "promise the mod will work, which also depends on which proxy DLL "
-            "the game loads."
+            "the game loads. An 'anticheat' field, where present, names a known "
+            "kernel anti-cheat system for that title (curated, not scraped)."
         ),
         "source": "NVIDIA GeForce RTX Games & Apps List",
         "source_page": NVIDIA_PAGE,

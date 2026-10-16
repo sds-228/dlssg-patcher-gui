@@ -91,6 +91,7 @@
     {
       "name": "Arena Breakout: Infinite",
       "fg": "override",
+      "anticheat": "Tencent ACE",
       "steam_appid": 2073620,
       "match": "exact"
     },
@@ -193,6 +194,7 @@
     {
       "name": "Battlefield 6",
       "fg": "yes",
+      "anticheat": "Javelin",
       "steam_appid": 2807960,
       "match": "exact"
     },
@@ -277,24 +279,28 @@
     {
       "name": "Call of Duty: Black Ops 6",
       "fg": "yes",
+      "anticheat": "Ricochet",
       "steam_appid": 4384550,
       "match": "exact"
     },
     {
       "name": "Call of Duty: Black Ops 7",
       "fg": "yes",
+      "anticheat": "Ricochet",
       "steam_appid": 3606480,
       "match": "exact"
     },
     {
       "name": "Call of Duty: Modern Warfare III",
       "fg": "yes",
+      "anticheat": "Ricochet",
       "steam_appid": 3595270,
       "match": "exact"
     },
     {
       "name": "Call of Duty: Warzone (2022)",
       "fg": "yes",
+      "anticheat": "Ricochet",
       "steam_appid": 1938090,
       "match": "fuzzy"
     },
@@ -487,6 +493,7 @@
     {
       "name": "Delta Force",
       "fg": "yes",
+      "anticheat": "Tencent ACE",
       "steam_appid": 2507950,
       "match": "exact"
     },

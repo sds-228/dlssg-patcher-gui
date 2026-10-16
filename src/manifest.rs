@@ -390,6 +390,24 @@ mod tests {
         assert!(plain.anticheat.is_none());
     }
 
+    /// The shipped catalog names the kernel anti-cheats for the protected titles
+    /// an install-dir scan cannot see. If a regen drops these, the warning stops
+    /// appearing, so pin a few here.
+    #[test]
+    fn catalog_flags_known_anticheat_games() {
+        let m: Manifest = serde_json::from_str(EMBEDDED_MANIFEST).unwrap();
+        let ac = |name: &str| {
+            m.games.iter().find(|g| g.name == name).and_then(|g| g.anticheat.clone())
+        };
+        assert_eq!(ac("Battlefield 6").as_deref(), Some("Javelin"));
+        assert_eq!(ac("Delta Force").as_deref(), Some("Tencent ACE"));
+        assert_eq!(ac("Arena Breakout: Infinite").as_deref(), Some("Tencent ACE"));
+        assert_eq!(ac("Call of Duty: Black Ops 6").as_deref(), Some("Ricochet"));
+        assert_eq!(ac("Call of Duty: Modern Warfare III").as_deref(), Some("Ricochet"));
+        // A title with no known anti-cheat must not be flagged by accident.
+        assert_eq!(ac("Cyberpunk 2077"), None);
+    }
+
     fn record(exe: &str) -> PatchRecord {
         PatchRecord {
             game_name: "Game".into(),
