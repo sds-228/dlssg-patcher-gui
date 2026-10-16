@@ -1143,7 +1143,7 @@ impl eframe::App for DlssgApp {
                     ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new(format!(
-                            "{} includes {ac} files. Proxy DLLs may be blocked or flagged in online modes.",
+                            "{} includes {ac}. Patching it, or going online with modded files, could result in a ban.",
                             row.name
                         ))
                         .color(TEXT),
@@ -1777,9 +1777,9 @@ impl DlssgApp {
                                 )
                                 .on_hover_text(format!("Found via {}", row.source));
                                 ui.add(egui::Label::new(&row.name).truncate());
-                                if let Some(ac) = row.anti_cheat.detected_name() {
+                                if let Some(tip) = row.anti_cheat.badge_tooltip() {
                                     ui.add(egui::Label::new(egui::RichText::new("⚠").color(WARN)))
-                                        .on_hover_text(format!("{ac} detected"));
+                                        .on_hover_text(tip);
                                 }
                             });
                             {

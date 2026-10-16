@@ -19,6 +19,21 @@ impl AcScan {
     pub fn detected_name(&self) -> Option<&str> {
         self.detected.as_deref()
     }
+
+    /// Tooltip for the row's warning badge, or `None` when there is nothing to
+    /// warn about. An incomplete scan also warns: "nothing found" then means
+    /// "not looked at", which must not be shown as clean.
+    pub fn badge_tooltip(&self) -> Option<String> {
+        match (&self.detected, self.incomplete) {
+            (Some(name), _) => Some(format!("{name} detected")),
+            (None, true) => Some(
+                "Anti-cheat scan was incomplete (very large install); a protected \
+                 title may not have been detected."
+                    .to_string(),
+            ),
+            (None, false) => None,
+        }
+    }
 }
 
 /// Entry budget for the directory walk. Normal installs are well under this.
@@ -206,5 +221,23 @@ mod tests {
         assert!(!detect_hinted(&clean, Some("")).is_detected());
         let _ = std::fs::remove_dir_all(&clean);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The warning badge must not read as a clean bill of health: an incomplete
+    /// walk (huge install, budget exhausted) warns too, because "not found" then
+    /// only means "not looked at".
+    #[test]
+    fn badge_tooltip_covers_detection_and_incomplete_scans() {
+        assert_eq!(AcScan::default().badge_tooltip(), None);
+
+        let hit = AcScan { detected: Some("Ricochet".into()), incomplete: false };
+        assert_eq!(hit.badge_tooltip().as_deref(), Some("Ricochet detected"));
+
+        let partial = AcScan { detected: None, incomplete: true };
+        assert!(partial.badge_tooltip().unwrap().contains("incomplete"));
+
+        // A concrete detection still wins over the incomplete flag.
+        let both = AcScan { detected: Some("BattlEye".into()), incomplete: true };
+        assert_eq!(both.badge_tooltip().as_deref(), Some("BattlEye detected"));
     }
 }
