@@ -10,8 +10,6 @@ permissions:
 
 jobs:
   build-windows:
-    # GitHub-hosted Windows runner. To go back to the local self-hosted runner,
-    # replace this with: [self-hosted, Windows, X64]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

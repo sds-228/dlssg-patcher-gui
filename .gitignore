@@ -1,11 +1,7 @@
 /target
 files/
-test/
 *.log
-backup_*/
 *.backup
-*.temp_table
-bt_full.txt*
 # Steam/NVIDIA downloads cached while regenerating games.json
 tools/.cache/
 __pycache__/
