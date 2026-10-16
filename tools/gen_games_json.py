@@ -28,7 +28,9 @@ Usage
 """
 
 import argparse
+import datetime
 import difflib
+import email.utils
 import hashlib
 import json
 import os
@@ -45,7 +47,6 @@ NVIDIA_DATA = (
     "https://www.nvidia.com/content/dam/en-zz/Solutions/geforce/news/"
     "nvidia-rtx-games-engines-apps/dlss-rt-games-apps-overrides.json"
 )
-NVIDIA_UPDATED = "2026-07-28"
 
 # The endpoint the storefront itself uses. Better recall than the documented
 # storesearch API, which returns nothing at all for some titles.
@@ -116,6 +117,11 @@ def cache_path_for(kind, term):
     return os.path.join(CACHE, kind, digest + ".json")
 
 
+def meta_path(cache_path):
+    """Sidecar holding the response's `Last-Modified`, used for `source_updated`."""
+    return cache_path + ".meta"
+
+
 def fetch(url, cache_path):
     """Return decoded text, or None if unobtainable. Cached on success only."""
     if not _refresh_cache[0] and os.path.exists(cache_path):
@@ -123,11 +129,13 @@ def fetch(url, cache_path):
             return f.read()
 
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    last_modified = None
     for attempt in range(4):
         try:
             throttle()
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read()
+                last_modified = resp.headers.get("Last-Modified")
             break
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < 3:
@@ -146,6 +154,9 @@ def fetch(url, cache_path):
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with open(cache_path, "wb") as f:
         f.write(raw)
+    if last_modified:
+        with open(meta_path(cache_path), "w", encoding="utf-8") as f:
+            f.write(last_modified)
     return raw.decode("utf-8", "replace")
 
 
@@ -200,6 +211,28 @@ def nvidia_fg_games():
         })
     out.sort(key=lambda g: g["name"].lower())
     return out
+
+
+def nvidia_updated(fetched_at=None):
+    """The NVIDIA list's own date, as YYYY-MM-DD.
+
+    Uses the `Last-Modified` header captured when the catalog was fetched
+    (`fetched_at`, or the sidecar written beside the cache); when neither is
+    available it falls back to today, so `source_updated` is never a stale
+    hand-written literal.
+    """
+    stamp = fetched_at
+    if not stamp:
+        meta = meta_path(os.path.join(CACHE, "nvidia.json"))
+        if os.path.exists(meta):
+            with open(meta, "r", encoding="utf-8") as f:
+                stamp = f.read().strip()
+    if stamp:
+        try:
+            return email.utils.parsedate_to_datetime(stamp).date().isoformat()
+        except (TypeError, ValueError):
+            pass
+    return datetime.date.today().isoformat()
 
 
 def steam_search(term):
@@ -329,7 +362,7 @@ def main():
         "source": "NVIDIA GeForce RTX Games & Apps List",
         "source_page": NVIDIA_PAGE,
         "source_data": NVIDIA_DATA,
-        "source_updated": NVIDIA_UPDATED,
+        "source_updated": nvidia_updated(),
         "match_notes": (
             "steam_appid confidence: 'exact' = store name matches the NVIDIA "
             "name; 'qualifier' = differs only by words like enhanced/remastered; "
