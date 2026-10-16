@@ -1,3 +1,14 @@
+//! GPU detection, including hybrid laptops.
+//!
+//! On a hybrid laptop the discrete NVIDIA GPU can be powered down - G-Helper's
+//! "Eco" mode, Optimus runtime D3, or simply a display driven by the integrated
+//! GPU. Windows then reports the card differently per source: `nvidia-smi` fails
+//! outright, the live `Win32_VideoController` list drops it, but the PnP
+//! display-device list still reports it (as `Unknown`/phantom). A powered-down or
+//! disabled card is still selected, because patching is a file operation: the user
+//! is guided by the amber card rather than locked out. That is why the inventory
+//! merges two Windows sources and why a non-`OK` card is accepted.
+
 use std::os::windows::process::CommandExt;
 
 use serde::{Deserialize, Serialize};
@@ -88,18 +99,14 @@ pub fn infer_arch(name: &str) -> Arch {
     }
 }
 
-/// Query the primary GPU via `nvidia-smi`, falling back to a Windows adapter
-/// inventory (`Win32_VideoController` plus PnP display devices) on hybrid laptops
-/// where the dGPU is powered down and only the integrated GPU drives the display.
+/// Query the primary GPU via `nvidia-smi`, falling back to the merged Windows
+/// adapter inventory when the dGPU is powered down (see the module docs).
 pub fn query_gpu() -> Result<GpuInfo, String> {
     match query_nvidia_smi() {
         Ok(info) => Ok(info),
         Err(smi_err) => {
-            // On a hybrid laptop the NVIDIA card can be powered down (the display
-            // is on the iGPU, or G-Helper/Optimus has put the dGPU to sleep), so
-            // nvidia-smi fails even though an RTX card is physically present.
-            // Consult the Windows adapter inventory so the user is guided instead
-            // of locked out of patching.
+            // nvidia-smi fails when the card is powered down; consult the Windows
+            // adapter inventory so the user is guided instead of locked out.
             if let Some((name, arch, igpu)) = pick_hybrid_gpu(&query_adapters()) {
                 return Ok(GpuInfo {
                     name,
@@ -163,13 +170,9 @@ pub(crate) fn parse_nvidia_smi(stdout: &str) -> Result<GpuInfo, String> {
     first_gpu.ok_or_else(|| "nvidia-smi returned no output".to_string())
 }
 
-/// Inventory the graphics adapters for the `nvidia-smi` fallback.
-///
-/// Two Windows sources are merged because they disagree about a dGPU that has
-/// been powered down (G-Helper "Eco" mode, or Optimus runtime D3): the live
-/// `Win32_VideoController` list drops it entirely, while the PnP display-device
-/// list still reports it (as `Unknown`/phantom). Either source failing is
-/// non-fatal - the other, and ultimately nvidia-smi's own error, still decide.
+/// Inventory the graphics adapters for the `nvidia-smi` fallback. The two Windows
+/// sources disagree about a powered-down dGPU (see the module docs); either
+/// failing is non-fatal - the other, and nvidia-smi's own error, still decide.
 fn query_adapters() -> Vec<Adapter> {
     let mut adapters = Vec::new();
     if let Ok(mut a) = query_video_controllers() {
@@ -182,8 +185,7 @@ fn query_adapters() -> Vec<Adapter> {
 }
 
 /// The live display controllers, via `Win32_VideoController`. Unlike `nvidia-smi`
-/// this lists the integrated GPU too, so it works on a laptop whose NVIDIA card
-/// is merely asleep.
+/// this lists the integrated GPU too, so it still works on a hybrid laptop.
 fn query_video_controllers() -> Result<Vec<Adapter>, String> {
     let stdout = run_powershell(
         "Get-CimInstance Win32_VideoController | ForEach-Object { \"$($_.Name)|$($_.DriverVersion)|$($_.Status)|$($_.PNPDeviceID)\" }",
@@ -191,9 +193,8 @@ fn query_video_controllers() -> Result<Vec<Adapter>, String> {
     Ok(parse_adapters(&stdout))
 }
 
-/// Every display-class PnP device, including powered-down ones. `Get-PnpDevice`
-/// (unlike `Win32_VideoController`) still lists a dGPU that Windows has put into
-/// a not-present state, which is exactly the hybrid case we are guiding for.
+/// Every display-class PnP device, including powered-down ones that
+/// `Win32_VideoController` omits (see the module docs).
 fn query_pnp_display_adapters() -> Result<Vec<Adapter>, String> {
     let stdout = run_powershell(
         "Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object { \"$($_.FriendlyName)||$($_.Status)|$($_.InstanceId)\" }",
@@ -228,7 +229,7 @@ pub struct Adapter {
     pub driver: String,
     /// `OK` (or empty when the column is absent) means the adapter is enabled
     /// and working. The PnP source can also report `Unknown` (a powered-down
-    /// dGPU, e.g. G-Helper "Eco"/Optimus runtime D3) or `Error` (disabled).
+    /// dGPU) or `Error` (disabled); see the module docs.
     pub status: String,
     /// The device instance path (e.g. `PCI\VEN_10DE&DEV_249C&...`), used to
     /// identify the vendor by PCI ID. Empty when the source did not report one.
@@ -276,11 +277,9 @@ fn is_nvidia(adapter: &Adapter) -> bool {
 /// Pick a supported NVIDIA card (RTX 20/30 series) from an adapter inventory,
 /// along with the name of an integrated adapter if present.
 ///
-/// A working adapter is preferred. When every NVIDIA card reported is currently
-/// not `OK` - a dGPU powered down by G-Helper "Eco" mode or Optimus runtime D3,
-/// which Windows reports as `Unknown` (phantom), or `Error` if it is disabled -
-/// the card is still selected: patching is a file operation, so the user is
-/// guided by the amber card rather than locked out.
+/// A working adapter is preferred. When no NVIDIA card is currently `OK` (it is
+/// powered down or disabled; see the module docs) the card is still selected,
+/// because patching is a file operation.
 pub fn pick_hybrid_gpu(adapters: &[Adapter]) -> Option<(String, Arch, Option<String>)> {
     let igpu = adapters
         .iter()
@@ -385,8 +384,7 @@ mod tests {
 
     #[test]
     fn pick_hybrid_gpu_accepts_a_disabled_dgpu() {
-        // A card disabled by G-Helper, or one Windows reports with an error, must
-        // not lock the user out of patching.
+        // A disabled card (status `Error`) must not lock the user out of patching.
         let adapters = vec![Adapter {
             name: "NVIDIA GeForce RTX 3060 Laptop GPU".into(),
             driver: "31.0.15.3699".into(),
@@ -398,10 +396,8 @@ mod tests {
 
     #[test]
     fn pick_hybrid_gpu_accepts_a_powered_down_dgpu() {
-        // G-Helper "Eco" mode (or Optimus runtime D3) powers the dGPU down, so
-        // Windows only reports it through the PnP display inventory, as `Unknown`
-        // (phantom). It must still be selectable so the user is guided, not locked
-        // out of patching.
+        // A powered-down dGPU is reported only through the PnP inventory, as
+        // `Unknown` (phantom); it must still be selectable, not locked out.
         let adapters = vec![
             ad("AMD Radeon(TM) Graphics"),
             Adapter {
