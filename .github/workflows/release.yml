@@ -24,14 +24,25 @@ jobs:
         # Needed on hosted Windows runners too: cargo lives in the user profile.
         run: .\build-release.ps1
 
+      - name: Generate third-party licenses
+        run: .\tools\gen_licenses.ps1
+
       - name: Create release asset bundle
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item target\release\dlssg-patcher.exe dist\
           Copy-Item README.md dist\
           Copy-Item LICENSE dist\
+          Copy-Item THIRD-PARTY-LICENSES.txt dist\
           Get-ChildItem dist | Select-Object Name
           Compress-Archive -Path dist\* -DestinationPath dlssg-patcher-windows.zip
+
+      - name: Write SHA256SUMS
+        run: |
+          $lines = Get-FileHash -Algorithm SHA256 target\release\dlssg-patcher.exe, dlssg-patcher-windows.zip |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" }
+          $lines | Set-Content -Encoding ascii SHA256SUMS
+          Get-Content SHA256SUMS
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
@@ -39,3 +50,5 @@ jobs:
           files: |
             dlssg-patcher-windows.zip
             target/release/dlssg-patcher.exe
+            SHA256SUMS
+            THIRD-PARTY-LICENSES.txt
