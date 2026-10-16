@@ -24,6 +24,39 @@ impl AcScan {
 /// Entry budget for the directory walk. Normal installs are well under this.
 const ENTRY_BUDGET: usize = 50_000;
 
+/// How a signature is compared against a file/dir name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Match {
+    /// The whole (lowercased) name equals the needle.
+    Exact,
+    /// The name starts with the needle (e.g. `beclient`).
+    Prefix,
+}
+
+/// Anti-cheat artifacts found inside a game install dir: `(needle, display name,
+/// match)`. Only systems whose install-dir files are confirmed appear here; the
+/// kernel-only systems (Ricochet, Tencent ACE, Javelin) leave no reliably-named
+/// file in the game folder, so they are covered by the catalog `anticheat` hint
+/// (`detect_hinted`) rather than by guessing file names.
+const SIGNATURES: &[(&str, &str, Match)] = &[
+    ("easyanticheat", "Easy Anti-Cheat", Match::Prefix),
+    ("start_protected_game.exe", "Easy Anti-Cheat", Match::Exact),
+    ("battleye", "BattlEye", Match::Exact),
+    ("beclient", "BattlEye", Match::Prefix),
+    ("beservice", "BattlEye", Match::Prefix),
+];
+
+/// Display name of the first signature matching a lowercased file/dir name.
+fn signature_for(name_lower: &str) -> Option<&'static str> {
+    SIGNATURES.iter().find_map(|(needle, display, how)| {
+        let hit = match how {
+            Match::Exact => name_lower == *needle,
+            Match::Prefix => name_lower.starts_with(needle),
+        };
+        hit.then_some(*display)
+    })
+}
+
 /// Detect a kernel/anti-tamper anti-cheat system inside a game install folder.
 ///
 /// This is a purely offline, name-based scan: installing the Frame Generation
@@ -49,11 +82,8 @@ pub(crate) fn detect_with_budget(install_dir: &Path, budget: usize) -> AcScan {
             }
             let name = entry.file_name().to_string_lossy().to_lowercase();
 
-            if name.starts_with("easyanticheat") || name == "start_protected_game.exe" {
-                return AcScan { detected: Some("Easy Anti-Cheat".to_string()), incomplete: false };
-            }
-            if name == "battleye" || name.starts_with("beclient") || name.starts_with("beservice") {
-                return AcScan { detected: Some("BattlEye".to_string()), incomplete: false };
+            if let Some(detected) = signature_for(&name) {
+                return AcScan { detected: Some(detected.to_string()), incomplete: false };
             }
 
             if depth < 2 {
@@ -71,6 +101,21 @@ pub(crate) fn detect_with_budget(install_dir: &Path, budget: usize) -> AcScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The signature table is the single place that maps an install-dir artifact
+    /// to a display name; these are the artifacts we can confirm appear in a game
+    /// folder (kernel-only systems are covered by the catalog hint instead).
+    #[test]
+    fn signature_table_maps_canonical_artifacts() {
+        assert_eq!(signature_for("easyanticheat_x64.dll"), Some("Easy Anti-Cheat"));
+        assert_eq!(signature_for("easyanticheat_eos.dll"), Some("Easy Anti-Cheat"));
+        assert_eq!(signature_for("start_protected_game.exe"), Some("Easy Anti-Cheat"));
+        assert_eq!(signature_for("battleye"), Some("BattlEye"));
+        assert_eq!(signature_for("beclient_x64.dll"), Some("BattlEye"));
+        assert_eq!(signature_for("beservice_x64.exe"), Some("BattlEye"));
+        assert_eq!(signature_for("game.exe"), None);
+        assert_eq!(signature_for("eac_launcher.exe"), None, "needles are not substrings");
+    }
 
     #[test]
     fn detects_eac_files() {
