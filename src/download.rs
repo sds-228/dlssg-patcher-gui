@@ -60,16 +60,15 @@ fn verify_release_zip(table: &[(&str, &str)], version: Option<&str>, bytes: &[u8
     }
 }
 
-/// Mirror base URLs to try, in order. Tag bases (immutable) come first, then the
-/// branch as a fallback so a tag/API outage never blocks patching.
+/// Mirror base URLs to try, in order. Tag bases only: an immutable tag is the
+/// one source whose bytes cannot change under us, and upstream `main` is never
+/// a payload source (see `mirror_bases_is_tag_only`). No tag => no bases.
 fn mirror_bases(tag: Option<&str>) -> Vec<String> {
     let mut v = Vec::new();
     if let Some(t) = tag {
         v.push(format!("https://raw.githubusercontent.com/{REPO}/{t}/"));
         v.push(format!("https://cdn.jsdelivr.net/gh/{REPO}@{t}/"));
     }
-    v.push(format!("https://raw.githubusercontent.com/{REPO}/main/"));
-    v.push(format!("https://cdn.jsdelivr.net/gh/{REPO}@main/"));
     v
 }
 
@@ -102,7 +101,8 @@ fn sanitize_tag(t: &str) -> Option<&str> {
 }
 
 /// Latest release tag from the GitHub API; fall back to the version advertised on
-/// `main` (README) when the API is unreachable or rate-limited.
+/// `main` (README) when the API is unreachable or rate-limited. The README read is
+/// a bare version *string* probe — it is never a source for a payload file.
 fn resolve_tag() -> Option<String> {
     if let Ok(json) = fetch_bytes_timeout(
         "https://api.github.com/repos/sdli1995/dlssg_for_sm86/releases/latest",
@@ -714,9 +714,20 @@ pub fn ensure_mod_files(
     }
 
     // The release is resolved ONCE: its tag and its asset URL have to agree, and asking
-    // `/releases/latest` twice (as `resolve_tag` would) can straddle a release.
+    // `/releases/latest` twice (as `resolve_tag` would) can straddle a release. When the
+    // API gave no tag, `resolve_tag` (which may read `main`'s README for a version string
+    // only) is the fallback; the payload bases themselves are always tag-only.
     let rel = resolve_release();
-    let bases = mirror_bases(rel.tag.as_deref());
+    let tag = rel.tag.clone().or_else(resolve_tag);
+    let bases = mirror_bases(tag.as_deref());
+    if bases.is_empty() {
+        if let Some(cb) = &progress {
+            cb("Could not resolve an immutable upstream tag; refusing to download mod files.".to_string());
+        }
+        eprintln!(
+            "[dlssg-patcher] no immutable upstream tag resolved; refusing to fetch payloads from a mutable branch"
+        );
+    }
     let cache_ini = cache.join(INI_NAME);
 
     let mut downloaded: HashMap<String, usize> = HashMap::new();
@@ -1066,17 +1077,23 @@ mod tests {
         assert_eq!(verify_release_zip(table, None, b"abc"), ZipTrust::Unverified);
     }
 
-    /// The fetch order is a safety property: the immutable release tag must be
-    /// tried before the moving `main` branch, with `main` only as a last resort.
+    /// Payload files must only ever come from an immutable tag. `main` is a
+    /// moving branch, and a DLL or the runtime tree fetched from it is an
+    /// unverifiable supply-chain input that later loads into a game process.
     #[test]
-    fn mirror_bases_puts_tag_first() {
+    fn mirror_bases_is_tag_only() {
         let with = mirror_bases(Some("0.3.5"));
+        assert_eq!(with.len(), 2, "a tag yields exactly the raw + jsDelivr bases");
         assert!(with[0].ends_with("/0.3.5/"), "{:?}", with[0]);
         assert!(with[1].contains("@0.3.5/"));
-        assert!(with.iter().any(|u| u.contains("/main/")));
-        let without = mirror_bases(None);
-        assert_eq!(without.len(), 2);
-        assert!(without.iter().all(|u| u.contains("/main/") || u.contains("@main/")));
+        assert!(
+            with.iter().all(|u| !u.contains("/main/") && !u.contains("@main/")),
+            "no base may point at main: {with:?}"
+        );
+        assert!(
+            mirror_bases(None).is_empty(),
+            "no immutable tag means no payload source at all"
+        );
     }
 
     #[test]
