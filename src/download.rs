@@ -216,6 +216,10 @@ pub const RUNTIME_SR_DIR: &str = "sr";
 /// persisted here after a download and reused on later (offline) launches.
 const VERSION_FILE: &str = "version.txt";
 
+/// Cache sidecar listing the SHA-256 of every installed payload file, so the
+/// exact bytes placed on disk can be audited after a download.
+const SHA256_FILE: &str = "sha256.txt";
+
 fn read_cached_version(cache: &Path) -> Option<String> {
     std::fs::read_to_string(cache.join(VERSION_FILE))
         .ok()
@@ -226,6 +230,39 @@ fn read_cached_version(cache: &Path) -> Option<String> {
 fn write_cached_version(cache: &Path, v: &str) {
     let v = v.trim();
     let _ = std::fs::write(cache.join(VERSION_FILE), v);
+}
+
+/// `(relative path, lowercase sha256)` for every required payload file present in
+/// `cache`. Paths are relative to `cache`; absent files are skipped.
+pub fn installed_hashes(cache: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for name in PROXY_NAMES {
+        let path = cache.join("proxy").join(name);
+        if let Ok(h) = crate::manifest::file_sha256(&path) {
+            out.push((format!("proxy/{name}"), h));
+        }
+    }
+    let ini = cache.join(INI_NAME);
+    if let Ok(h) = crate::manifest::file_sha256(&ini) {
+        out.push((INI_NAME.to_string(), h));
+    }
+    for rel in RUNTIME_REQUIRED {
+        let path = cache.join(RUNTIME_DIR_NAME).join(rel);
+        if let Ok(h) = crate::manifest::file_sha256(&path) {
+            out.push((format!("{RUNTIME_DIR_NAME}/{rel}"), h));
+        }
+    }
+    out
+}
+
+/// Render sha256sum-style lines: `<hash>  <rel>` for each entry.
+fn hash_lines(files: &[(String, String)]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (rel, hash) in files {
+        let _ = writeln!(out, "{hash}  {rel}");
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -864,6 +901,16 @@ pub fn ensure_mod_files(
         write_cached_version(&cache, v);
     }
 
+    // 5b. Record the exact bytes that ended up in the cache, so what was installed
+    // can be audited after the fact.
+    let hashes = installed_hashes(&cache);
+    let _ = std::fs::write(cache.join(SHA256_FILE), hash_lines(&hashes));
+    if let Some(cb) = &progress {
+        for (rel, h) in &hashes {
+            cb(format!("Installed {rel} sha256={h}"));
+        }
+    }
+
     // 6. Report exactly what is absent, so the UI names the missing piece instead of
     // "missing: ". The runtime tree cannot come from the repo mirrors: the payload files are
     // tag-only and `sr/` is release-zip only, so if it is gone the cache stays incomplete and
@@ -1075,6 +1122,35 @@ mod tests {
         assert_eq!(verify_release_zip(table, Some("1.2.3"), b"tampered"), ZipTrust::Mismatch);
         assert_eq!(verify_release_zip(table, Some("9.9.9"), b"abc"), ZipTrust::Unverified);
         assert_eq!(verify_release_zip(table, None, b"abc"), ZipTrust::Unverified);
+    }
+
+    #[test]
+    fn hash_lines_renders_sha256sum_format() {
+        let lines = hash_lines(&[
+            ("proxy/version.dll".to_string(), "ab".to_string()),
+            (INI_NAME.to_string(), "cd".to_string()),
+        ]);
+        assert_eq!(lines, "ab  proxy/version.dll\ncd  dlssg_sm86.ini\n");
+        assert_eq!(hash_lines(&[]), "");
+    }
+
+    #[test]
+    fn installed_hashes_lists_only_present_payload_files() {
+        let dir = std::env::temp_dir().join(format!("dl_hashes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("proxy")).unwrap();
+        std::fs::write(dir.join("proxy").join("version.dll"), b"MZ..").unwrap();
+        std::fs::write(dir.join(INI_NAME), b"ini").unwrap();
+
+        let hashes = installed_hashes(&dir);
+        let rels: Vec<&str> = hashes.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(rels.contains(&"proxy/version.dll"), "{rels:?}");
+        assert!(rels.contains(&INI_NAME), "{rels:?}");
+        assert!(!rels.iter().any(|r| r.ends_with("winmm.dll")), "absent proxies are skipped: {rels:?}");
+        let vh = hashes.iter().find(|(r, _)| r == "proxy/version.dll").unwrap();
+        assert_eq!(vh.1, sha256_hex(b"MZ.."));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Payload files must only ever come from an immutable tag. `main` is a
