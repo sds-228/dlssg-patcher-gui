@@ -47,6 +47,11 @@ pub struct ManifestGame {
     /// Which proxy DLL name to install (version.dll, winmm.dll, dinput8.dll, winhttp.dll, dxgi.dll).
     #[serde(default = "default_proxy")]
     pub proxy: String,
+    /// Kernel anti-cheat guarding this title (e.g. "Ricochet", "Tencent ACE",
+    /// "Javelin"). Its artifacts live in System32, not the game folder, so this
+    /// name is the only reliable way to warn before patching a protected game.
+    #[serde(default)]
+    pub anticheat: Option<String>,
 }
 
 impl ManifestGame {
@@ -374,6 +379,17 @@ pub fn unix_seconds() -> u64 {
 mod tests {
     use super::*;
 
+    /// `anticheat` is optional: absent in the shipped catalog for most rows, so
+    /// old or trimmed `games.json` files must still deserialize.
+    #[test]
+    fn manifest_game_reads_the_anticheat_hint() {
+        let g: ManifestGame =
+            serde_json::from_str(r#"{"name":"Delta Force","anticheat":"Tencent ACE"}"#).unwrap();
+        assert_eq!(g.anticheat.as_deref(), Some("Tencent ACE"));
+        let plain: ManifestGame = serde_json::from_str(r#"{"name":"Simple"}"#).unwrap();
+        assert!(plain.anticheat.is_none());
+    }
+
     fn record(exe: &str) -> PatchRecord {
         PatchRecord {
             game_name: "Game".into(),
@@ -637,6 +653,7 @@ mod tests {
             folders: vec![],
             render_exe: String::new(),
             proxy: default_proxy(),
+            anticheat: None,
         }
     }
 

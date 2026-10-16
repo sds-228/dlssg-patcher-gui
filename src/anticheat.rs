@@ -67,6 +67,19 @@ pub fn detect(install_dir: &Path) -> AcScan {
     detect_with_budget(install_dir, ENTRY_BUDGET)
 }
 
+/// Like [`detect`], but the catalog can name the system outright.
+///
+/// Kernel anti-cheats (Ricochet, Tencent ACE, Javelin) put their files in
+/// System32 rather than the game folder, so a name scan of the install dir can
+/// never find them; for a catalogued title the answer comes from `games.json`.
+/// A missing/blank hint means "unknown" and falls back to the file scan.
+pub fn detect_hinted(install_dir: &Path, hint: Option<&str>) -> AcScan {
+    match hint.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(name) => AcScan { detected: Some(name.to_string()), incomplete: false },
+        None => detect(install_dir),
+    }
+}
+
 /// Scan with an explicit entry budget. Tests use a small budget to force the
 /// `incomplete` path without creating 50 000 files.
 pub(crate) fn detect_with_budget(install_dir: &Path, budget: usize) -> AcScan {
@@ -161,6 +174,37 @@ mod tests {
         assert!(s.incomplete && s.detected.is_none());
         let s2 = detect_with_budget(&dir, 100);
         assert!(!s2.incomplete);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The catalog knows the protected title by name even when the install dir
+    /// holds no recognizable file (kernel anti-cheats leave nothing in the game
+    /// folder), so the hint must win over the name scan.
+    #[test]
+    fn catalog_hint_wins_over_the_file_scan() {
+        let dir = std::env::temp_dir().join(format!("ac_hint_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("EasyAntiCheat_x64.dll"), b"x").unwrap();
+        let s = detect_hinted(&dir, Some("Ricochet"));
+        assert_eq!(s.detected_name(), Some("Ricochet"));
+        assert!(!s.incomplete);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing or whitespace-only hint means "unknown": the file scan decides.
+    #[test]
+    fn blank_hint_falls_through_to_the_file_scan() {
+        let dir = std::env::temp_dir().join(format!("ac_hint2_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("EasyAntiCheat_x64.dll"), b"x").unwrap();
+        assert_eq!(detect_hinted(&dir, None).detected_name(), Some("Easy Anti-Cheat"));
+        assert_eq!(detect_hinted(&dir, Some("   ")).detected_name(), Some("Easy Anti-Cheat"));
+        // A blank hint must not fabricate a detection on a clean folder either.
+        let clean = std::env::temp_dir().join(format!("ac_hint3_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&clean);
+        std::fs::write(clean.join("game.exe"), b"x").unwrap();
+        assert!(!detect_hinted(&clean, Some("")).is_detected());
+        let _ = std::fs::remove_dir_all(&clean);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

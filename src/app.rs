@@ -486,7 +486,9 @@ impl DlssgApp {
             };
             let total = games.len();
             for (i, g) in games.iter_mut().enumerate() {
-                g.anti_cheat = anticheat::detect(&g.install_dir);
+                let hint = find_manifest_game_by_appid(&manifest, g.appid, &g.folder_name)
+                    .and_then(|c| c.anticheat.as_deref());
+                g.anti_cheat = anticheat::detect_hinted(&g.install_dir, hint);
                 // Catalogued games normally get their render path straight from
                 // games.json, so only pay for a full autodetect walk when that
                 // path is missing or stale (reinstall / moved folder / different
@@ -876,7 +878,10 @@ impl DlssgApp {
             let support_tag = support_tag(catalog, Some(&render_exe_path));
             let render_exe = Some(PathBuf::from(&m.render_exe)).filter(|p| p.is_file());
             let proxy = self.resolve_game_proxy(&dir, render_exe.as_ref(), catalog);
-            let anti_cheat = anticheat::detect(Path::new(&m.install_dir));
+            let anti_cheat = anticheat::detect_hinted(
+                Path::new(&m.install_dir),
+                catalog.and_then(|c| c.anticheat.as_deref()),
+            );
             rows.push(Row {
                 name: m.name.clone(),
                 install_dir: dir,
@@ -3149,6 +3154,7 @@ mod tests {
             folders: vec![],
             render_exe: String::new(),
             proxy: proxy.into(),
+            anticheat: None,
         }
     }
 
