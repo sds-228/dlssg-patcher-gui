@@ -8,8 +8,8 @@ use eframe::egui;
 use crate::download::{check_for_update, ensure_mod_files, version_cmp, ModFiles, UpdateInfo};
 use crate::gpu::{driver_note, query_gpu, Arch, GpuInfo};
 use crate::manifest::{
-    exe_key, find_manifest_game, find_manifest_game_by_appid, load_manifest, load_state, save_state,
-    ManualGame, Manifest, ManifestGame, PatchRecord, State,
+    exe_key, find_manifest_game, find_manifest_game_by_appid, load_manifest_reporting, load_state,
+    save_state, ManualGame, Manifest, ManifestGame, PatchRecord, State,
 };
 use crate::patcher::{self, InstallRequest};
 use crate::anticheat;
@@ -378,10 +378,7 @@ impl DlssgApp {
         }
         local_dirs.push(state_dir.join("files"));
 
-        let manifest = load_manifest().unwrap_or_else(|e| {
-            eprintln!("[dlssg-patcher] manifest error: {e}");
-            load_manifest_from_empty()
-        });
+        let (manifest, manifest_warning) = load_manifest_reporting();
         let (state, state_warning) = crate::manifest::load_state_recovering();
 
         let (tx, rx) = mpsc::channel();
@@ -414,6 +411,9 @@ impl DlssgApp {
             rows_dirty: true,
         };
         app.log("Started DLSSG Patcher".into());
+        if let Some(w) = manifest_warning {
+            app.log(w);
+        }
         if let Some(w) = state_warning {
             app.log(w);
         }
@@ -474,7 +474,10 @@ impl DlssgApp {
             for note in &notes {
                 let _ = tx.send(Msg::Progress(format!("  {note}")));
             }
-            let manifest = load_manifest().unwrap_or_else(|_| load_manifest_from_empty());
+            let (manifest, manifest_warning) = load_manifest_reporting();
+            if let Some(w) = manifest_warning {
+                let _ = tx.send(Msg::Progress(format!("  {w}")));
+            }
             let catalog_exe_present = |g: &InstalledGame| {
                 find_manifest_game_by_appid(&manifest, g.appid, &g.folder_name)
                     .filter(|m| !m.render_exe.is_empty())
@@ -1153,10 +1156,6 @@ impl eframe::App for DlssgApp {
                 });
         }
     }
-}
-
-fn load_manifest_from_empty() -> Manifest {
-    Manifest { games: Vec::new() }
 }
 
 // ---------------------------------------------------------------- UI sections

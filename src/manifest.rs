@@ -14,6 +14,10 @@ pub const STATE_FOLDER: &str = "dlssg-patcher";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub games: Vec<ManifestGame>,
+    /// Date the catalog was generated (ISO `YYYY-MM-DD`). Used to decide whether
+    /// an external `games.json` is newer than this embedded copy.
+    #[serde(default)]
+    pub source_updated: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,22 +63,58 @@ fn default_proxy() -> String {
 
 const EMBEDDED_MANIFEST: &str = include_str!("../games.json");
 
-/// Load the manifest: prefer an editable `games.json` next to the executable,
-/// otherwise fall back to the embedded copy.
-pub fn load_manifest() -> Result<Manifest, String> {
-    let mut manifest: Manifest = serde_json::from_str(EMBEDDED_MANIFEST)
-        .map_err(|e| format!("failed to parse embedded games.json: {e}"))?;
+/// Choose a manifest: the embedded catalog is authoritative, and an external
+/// `games.json` only wins when it declares a `source_updated` at least as new as
+/// the embedded one. Unreadable/malformed/stale external files are reported and
+/// ignored rather than allowed to break the catalog.
+fn load_manifest_from(embedded_json: &str, external: Option<&Path>) -> (Manifest, Option<String>) {
+    let embedded: Manifest = match serde_json::from_str(embedded_json) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                Manifest { games: Vec::new(), source_updated: None },
+                Some(format!("embedded games.json is invalid: {e}")),
+            )
+        }
+    };
 
-    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())) {
-        let external = exe_dir.join("games.json");
-        if external.is_file() {
-            match serde_json::from_str::<Manifest>(&std::fs::read_to_string(&external).map_err(|e| e.to_string())?) {
-                Ok(m) => manifest = m,
-                Err(e) => eprintln!("[dlssg-patcher] ignoring bad external games.json ({}): {e}", external.display()),
+    let Some(external) = external else { return (embedded, None) };
+    if !external.is_file() {
+        return (embedded, None);
+    }
+    let text = match std::fs::read_to_string(external) {
+        Ok(t) => t,
+        Err(e) => return (embedded, Some(format!("ignoring unreadable games.json: {e}"))),
+    };
+    match serde_json::from_str::<Manifest>(&text) {
+        Err(e) => (embedded, Some(format!("ignoring malformed games.json: {e}"))),
+        Ok(m) => {
+            let newer = matches!(
+                (&m.source_updated, &embedded.source_updated),
+                (Some(a), Some(b)) if a >= b
+            );
+            if newer {
+                (m, None)
+            } else {
+                let msg = format!(
+                    "using the built-in catalog (source_updated {}); the games.json beside the app is older ({})",
+                    embedded.source_updated.as_deref().unwrap_or("none"),
+                    m.source_updated.as_deref().unwrap_or("none")
+                );
+                (embedded, Some(msg))
             }
         }
     }
-    Ok(manifest)
+}
+
+/// Load the manifest from the embedded catalog plus an optional editable
+/// `games.json` next to the executable. Never fails; problems come back as a
+/// message for the activity log.
+pub fn load_manifest_reporting() -> (Manifest, Option<String>) {
+    let external = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("games.json")));
+    load_manifest_from(EMBEDDED_MANIFEST, external.as_deref())
 }
 
 /// Look up a catalog entry for a scanned install.
@@ -395,6 +435,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The embedded catalog is authoritative: an external `games.json` must not
+    /// silently downgrade it to an older snapshot.
+    #[test]
+    fn external_catalog_is_ignored_when_older_or_undated() {
+        let embedded = r#"{"games":[{"name":"Base"}],"source_updated":"2026-07-28"}"#;
+        let dir = temp_state_dir("catalog_stale");
+        let ext = dir.join("games.json");
+
+        std::fs::write(&ext, r#"{"games":[{"name":"Ext"}],"source_updated":"2025-01-01"}"#).unwrap();
+        let (m, w) = load_manifest_from(embedded, Some(&ext));
+        assert_eq!(m.games[0].name, "Base", "an older external catalog must lose");
+        assert!(w.is_some(), "and its rejection must be reported");
+
+        std::fs::write(&ext, r#"{"games":[{"name":"Ext"}]}"#).unwrap();
+        let (m, w) = load_manifest_from(embedded, Some(&ext));
+        assert_eq!(m.games[0].name, "Base", "an undated external catalog must lose");
+        assert!(w.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn external_catalog_wins_when_newer_and_bad_json_keeps_embedded() {
+        let embedded = r#"{"games":[{"name":"Base"}],"source_updated":"2026-07-28"}"#;
+        let dir = temp_state_dir("catalog_new");
+        let ext = dir.join("games.json");
+
+        std::fs::write(&ext, r#"{"games":[{"name":"Ext"}],"source_updated":"2026-08-01"}"#).unwrap();
+        let (m, w) = load_manifest_from(embedded, Some(&ext));
+        assert_eq!(m.games[0].name, "Ext", "a newer external catalog wins");
+        assert!(w.is_none());
+
+        std::fs::write(&ext, b"{ not json").unwrap();
+        let (m, w) = load_manifest_from(embedded, Some(&ext));
+        assert!(
+            w.expect("malformed input must be reported").contains("malformed"),
+            "the warning must name the problem"
+        );
+        assert_eq!(m.games[0].name, "Base", "the embedded catalog still loads");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Windows paths are case-insensitive, and a rescan can easily come back with a
     /// different drive-letter or folder casing than patch time. The record lookup
     /// must agree with the on-disk cache key, otherwise a patched game looks stale.
@@ -561,6 +644,7 @@ mod tests {
     fn appid_match_beats_folder_name() {
         let m = Manifest {
             games: vec![entry("Cyberpunk 2077", Some(1091500), Some("exact"))],
+            source_updated: None,
         };
         // The folder was renamed, so only the AppID can identify this install.
         let g = find_manifest_game_by_appid(&m, Some(1091500), "SomeRenamedFolder");
