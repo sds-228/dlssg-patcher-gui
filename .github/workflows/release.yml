@@ -30,7 +30,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item target\release\dlssg-patcher.exe dist\
-          Copy-Item games.json dist\
           Copy-Item README.md dist\
           Copy-Item LICENSE dist\
           Get-ChildItem dist | Select-Object Name
