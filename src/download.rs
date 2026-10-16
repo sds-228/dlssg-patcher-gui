@@ -10,6 +10,56 @@ const REPO: &str = "sdli1995/dlssg_for_sm86";
 /// unreachable.
 const RAW_BASE: &str = "https://raw.githubusercontent.com/sdli1995/dlssg_for_sm86/main/";
 
+/// SHA-256 of known upstream release zips, keyed by version without the leading
+/// `v`. A known version's zip is verified before extraction; an unknown (newer)
+/// version is still accepted but reported as unverified.
+const PINNED_RELEASE_SHA256: &[(&str, &str)] = &[(
+    "0.4.0",
+    "5865360c3295038f0ff979d303bb7eb9437eec09fbc08686967d3b5d41d9c019",
+)];
+
+/// Lowercase hex SHA-256 of a byte slice.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// The pinned hash for a version, accepting an optional leading `v`.
+fn pinned_release_hash(version: Option<&str>) -> Option<&'static str> {
+    let v = version?.trim().trim_start_matches('v');
+    PINNED_RELEASE_SHA256
+        .iter()
+        .find(|(k, _)| *k == v)
+        .map(|(_, h)| *h)
+}
+
+/// Outcome of checking a fetched release zip against the pinned hashes.
+#[derive(Debug, PartialEq, Eq)]
+enum ZipTrust {
+    /// A pinned hash exists and matches the bytes.
+    Trusted,
+    /// No pinned hash for this version; accepted, but not verifiable.
+    Unverified,
+    /// A pinned hash exists and does not match: refuse the bytes.
+    Mismatch,
+}
+
+/// Classify a fetched release zip for `version` against `table`.
+fn verify_release_zip(table: &[(&str, &str)], version: Option<&str>, bytes: &[u8]) -> ZipTrust {
+    let v = version.map(|s| s.trim().trim_start_matches('v'));
+    match v.and_then(|v| table.iter().find(|(k, _)| *k == v).map(|(_, h)| *h)) {
+        Some(expected) if sha256_hex(bytes) == expected => ZipTrust::Trusted,
+        Some(_) => ZipTrust::Mismatch,
+        None => ZipTrust::Unverified,
+    }
+}
+
 /// Mirror base URLs to try, in order. Tag bases (immutable) come first, then the
 /// branch as a fallback so a tag/API outage never blocks patching.
 fn mirror_bases(tag: Option<&str>) -> Vec<String> {
@@ -690,6 +740,26 @@ pub fn ensure_mod_files(
     for url in &zip_candidates {
         match fetch_zip_with_stall(url, &progress) {
             Ok(bytes) => {
+                match verify_release_zip(PINNED_RELEASE_SHA256, version_from_readme_or_tag, &bytes) {
+                    ZipTrust::Mismatch => {
+                        let expected =
+                            pinned_release_hash(version_from_readme_or_tag).unwrap_or("(unknown)");
+                        if let Some(cb) = &progress {
+                            cb(format!("Release zip failed its integrity check (expected sha256 {expected}); refusing it."));
+                        }
+                        eprintln!("[dlssg-patcher] release zip sha256 mismatch for {url}; refusing");
+                        continue;
+                    }
+                    ZipTrust::Unverified => {
+                        if let Some(cb) = &progress {
+                            cb(format!(
+                                "Release {} has no pinned hash; installing it as unverified.",
+                                version_from_readme_or_tag.unwrap_or("(unknown)")
+                            ));
+                        }
+                    }
+                    ZipTrust::Trusted => {}
+                }
                 extract_release_zip(&bytes, &cache, false)?;
                 // Stop at the first URL that leaves a complete, patchable cache.
                 if cache_is_complete(&cache) {
@@ -970,6 +1040,30 @@ mod tests {
         assert!(is_usable(&ini), "non-dll files only need a sane size");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pinned_release_hash_matches_known_versions_only() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let h = "5865360c3295038f0ff979d303bb7eb9437eec09fbc08686967d3b5d41d9c019";
+        assert_eq!(pinned_release_hash(Some("0.4.0")), Some(h));
+        assert_eq!(pinned_release_hash(Some("v0.4.0")), Some(h));
+        assert_eq!(pinned_release_hash(Some("9.9.9")), None);
+        assert_eq!(pinned_release_hash(None), None);
+    }
+
+    #[test]
+    fn verify_release_zip_classifies_known_unknown_and_tampered() {
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let table: &[(&str, &str)] = &[("1.2.3", abc)];
+        assert_eq!(verify_release_zip(table, Some("1.2.3"), b"abc"), ZipTrust::Trusted);
+        assert_eq!(verify_release_zip(table, Some("v1.2.3"), b"abc"), ZipTrust::Trusted);
+        assert_eq!(verify_release_zip(table, Some("1.2.3"), b"tampered"), ZipTrust::Mismatch);
+        assert_eq!(verify_release_zip(table, Some("9.9.9"), b"abc"), ZipTrust::Unverified);
+        assert_eq!(verify_release_zip(table, None, b"abc"), ZipTrust::Unverified);
     }
 
     /// The fetch order is a safety property: the immutable release tag must be
