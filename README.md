@@ -31,4 +31,6 @@ A lightweight GUI for [dlssg_for_sm86](https://github.com/sdli1995/dlssg_for_sm8
 
 ## License
 
-MIT License — see [LICENSE](LICENSE). The upstream mod is downloaded at runtime and governed by its own license. 
+MIT License — see [LICENSE](LICENSE). The upstream mod is downloaded at runtime and governed by its own license.
+
+This project is not affiliated with, endorsed by, or sponsored by NVIDIA.
