@@ -661,7 +661,7 @@ pub fn is_runtime_dir_usable(dir: &Path) -> bool {
 
 /// True when the cache can patch a game without touching the network: all six proxies,
 /// the INI, and a complete runtime tree. A 0.3.5-era cache fails this by construction,
-/// which is what makes an upgrade fetch the 0.4.0 bundle on launch.
+/// so an upgrade fetches the 0.4.0 bundle on launch.
 fn cache_is_complete(cache: &Path) -> bool {
     let proxy_dir = cache.join("proxy");
     PROXY_NAMES.iter().all(|n| is_usable(&proxy_dir.join(n)))

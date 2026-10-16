@@ -852,8 +852,8 @@ mod tests {
             "the runtime tree must be installed before this test means anything"
         );
 
-        // A real 0.4.0 patch leaves ~33 MB of payload, and the mod writes its logs inside
-        // the tree. The old code only removed the folder while it happened to be empty.
+        // A real 0.4.0 patch leaves ~33 MB of payload, and the mod writes its logs
+        // inside the tree, so unpatching must remove a folder that has content in it.
         write_bytes(
             &game_dir
                 .join(crate::download::RUNTIME_DIR_NAME)
@@ -1364,10 +1364,10 @@ mod tests {
         let _ = fs::remove_dir_all(&game_dir);
     }
 
-    /// The bug this whole exercise exists for: a patch record whose install folder
-    /// moved. Relink must re-point the record AND its backups, otherwise a later
-    /// Unpatch writes the game's original DLLs back into a directory that no longer
-    /// exists and the record can never be cleared.
+    /// A patch record whose install folder moved. Relink must re-point the record
+    /// AND its backups, otherwise a later Unpatch writes the game's original DLLs
+    /// back into a directory that no longer exists and the record can never be
+    /// cleared.
     #[test]
     fn relink_rebases_record_and_backups_onto_new_folder() {
         let game_dir = tmpdir("relink_old");

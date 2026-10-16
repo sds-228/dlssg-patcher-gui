@@ -323,16 +323,16 @@ pub struct DlssgApp {
     /// expanded panel does not squeeze the games table.
     show_log: bool,
     eraser_confirm: bool,
-    /// Whether the "About" credits modal is open. The upstream credits live here
-    /// now instead of the header, so the header can stay a compact single line.
+    /// Whether the "About" credits modal is open, which keeps the upstream
+    /// credits out of the header so it stays a compact single line.
     show_about: bool,
     /// Set when the user hits Patch on a game with a detected anti-cheat, so the
     /// install only proceeds after an explicit "Patch anyway".
     patch_confirm: Option<Row>,
 
     // Whether each patched render exe currently has our files on disk. Rebuilt
-    // only when patches change: computing it live means hashing the 15 MB proxy
-    // DLL for every row on every frame, which made the UI hang after patching.
+    // only when patches change: computing it per frame would hash the 15 MB proxy
+    // DLL for every row and stall the UI.
     patch_ready: HashMap<String, bool>,
     patch_ready_dirty: bool,
 
@@ -792,17 +792,16 @@ impl DlssgApp {
     /// State-owned patches are only hashed the first time we see them; their
     /// results are stored in `patch_ready` and trusted afterwards. Otherwise
     /// every patch/unpatch would re-read a 15 MB proxy DLL once per record on
-    /// the UI thread, which is what made the tool freeze after clicking Patch.
+    /// the UI thread and stall it.
     fn rebuild_patch_cache(&mut self) {
         let mut ready: HashMap<String, bool> = HashMap::new();
         for p in &self.state.patches {
             let key = exe_key(&p.render_exe);
             // Only a POSITIVE result is ever reused. It saves re-hashing the
-            // 15 MB proxy DLL for every record on the UI thread, which is what
-            // froze the tool after clicking Patch. A negative is deliberately
-            // re-probed on every rebuild: the folder may have been remounted,
-            // moved back, or restored, and a cached `false` made a genuinely
-            // patched game report the wrong patch state until the app was restarted.
+            // 15 MB proxy DLL for every record on the UI thread. A negative is
+            // deliberately re-probed on every rebuild: the folder may have been
+            // remounted, moved back, or restored, and a cached `false` would let
+            // a genuinely patched game report the wrong patch state until restart.
             if self.patch_ready.get(&key) == Some(&true) {
                 ready.insert(key, true);
                 continue;
@@ -1405,15 +1404,15 @@ impl DlssgApp {
                     ui.label(egui::RichText::new("Activity").strong().size(13.0).color(TERM_GREEN));
                     ui.add_space(4.0);
                     // Painted hairline instead of a box-drawing glyph: the bundled
-                    // font has no glyph for "│" and rendered it as a missing-glyph box.
+                    // font has no glyph for "│", which renders as a missing-glyph
+                    // box.
                     let (sep, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), egui::Sense::hover());
                     ui.painter().vline(sep.center().x, sep.y_range(), egui::Stroke::new(1.0_f32, TERM_BORDER));
                     ui.add_space(6.0);
 
                     // The message is laid out inside a rect measured up front, with
-                    // the toggle's width subtracted. Letting the label size itself
-                    // first (as this did before) meant a long line pushed into - and
-                    // sometimes over - the button.
+                    // the toggle's width subtracted, so a long line cannot push
+                    // into or past the toggle.
                     const TOGGLE_W: f32 = 26.0;
                     let msg_w = (ui.available_width() - TOGGLE_W - 8.0).max(40.0);
                     let (msg_rect, _) =
@@ -1426,8 +1425,8 @@ impl DlssgApp {
                     msg_ui.add(egui::Label::new(egui::RichText::new(&last).color(color).size(13.0)).truncate());
 
                     ui.add_space(4.0);
-                    // Compact icon toggle in place of a full "Show log" button, which
-                    // was wide enough to squeeze the message out of a narrow window.
+                    // Compact icon toggle: a full "Show log" button is wide enough
+                    // to squeeze the message out of a narrow window.
                     let (btn_rect, btn) =
                         ui.allocate_exact_size(egui::vec2(TOGGLE_W, 20.0), egui::Sense::click());
                     let hot = btn.hovered();
@@ -1448,9 +1447,8 @@ impl DlssgApp {
                         egui::StrokeKind::Inside,
                     );
                     // Hamburger drawn as three painted lines rather than a "≡"/"☰"
-                    // glyph - the bundled font is missing several symbol codepoints,
-                    // which is what turned the earlier box-drawing separator into a
-                    // missing-glyph square.
+                    // glyph: the bundled font is missing several symbol codepoints,
+                    // so such glyphs render as a missing-glyph square.
                     let stroke = egui::Stroke::new(1.2_f32, tint);
                     let bar_w = 12.0;
                     let x0 = btn_rect.center().x - bar_w / 2.0;
@@ -2510,7 +2508,7 @@ fn has_fg_dll(exe: &Path) -> bool {
 /// A grid cell fixed to a given width so the total table width can't exceed the
 /// panel. Content clips; callers add tooltips via the returned Response.
 ///
-/// IMPORTANT (egui 0.32 internals): a Grid sizes each column by the _actually
+/// egui 0.32 note: a Grid sizes each column by the _actually
 /// used_ rect of its cells, not the rect you ask for. `allocate_ui_with_layout`
 /// records the child's final `min_rect` (content width), so cells that don't
 /// fill their allocation (left-aligned truncate labels) collapse the column to
@@ -2789,10 +2787,10 @@ fn grid_header_c(ui: &mut egui::Ui, width: f32, text: &str, tip: Option<&str>) {
 
 /// A group label inside the grid ("Patched (3)", "All other games (n)").
 ///
-/// IMPORTANT: the label cell must stay inside the FIRST column (`width` =
-/// name_w). A cell wider than the first column would push column 0 to that
-/// width (egui Grid sizes columns by their widest cell) and shove every other
-/// column off the table.
+/// The label cell must stay inside the first column (`width` = name_w): a cell
+/// wider than the first column would push column 0 to that width (egui Grid
+/// sizes columns by their widest cell) and shove every other column off the
+/// table.
 ///
 /// The cell is `LABEL_H + top_pad` tall and the label is bottom-aligned, so the
 /// padding lands *above* the label. That is what attaches a section to the rows
@@ -3208,7 +3206,7 @@ mod tests {
         assert_eq!(primary_action(true, true, false, true), RowAction::Unpatch);
         // Up to date: unchanged behaviour.
         assert_eq!(primary_action(true, true, true, false), RowAction::Unpatch);
-        // `row_action` itself is untouched by this round.
+        // `row_action` still reports the raw state, with no promotion.
         assert_eq!(row_action(true, true, true), RowAction::Unpatch);
         assert_eq!(row_action(false, true, true), RowAction::Patch);
     }
