@@ -17,10 +17,16 @@ const RAW_BASE: &str = "https://raw.githubusercontent.com/sdli1995/dlssg_for_sm8
 /// SHA-256 of known upstream release zips, keyed by version without the leading
 /// `v`. A known version's zip is verified before extraction; an unknown (newer)
 /// version is still accepted but reported as unverified.
-const PINNED_RELEASE_SHA256: &[(&str, &str)] = &[(
-    "0.4.0",
-    "5865360c3295038f0ff979d303bb7eb9437eec09fbc08686967d3b5d41d9c019",
-)];
+const PINNED_RELEASE_SHA256: &[(&str, &str)] = &[
+    (
+        "0.4.0",
+        "5865360c3295038f0ff979d303bb7eb9437eec09fbc08686967d3b5d41d9c019",
+    ),
+    (
+        "0.4.1",
+        "7230131637617ede9dc45c552244ddb814ae70098406e102fc254d52bcdb6e14",
+    ),
+];
 
 /// Lowercase hex SHA-256 of a byte slice.
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -41,6 +47,11 @@ fn pinned_release_hash(version: Option<&str>) -> Option<&'static str> {
         .iter()
         .find(|(k, _)| *k == v)
         .map(|(_, h)| *h)
+}
+
+/// True when this release has a pinned SHA-256 and can be verified on download.
+pub fn is_pinned_version(version: &str) -> bool {
+    pinned_release_hash(Some(version)).is_some()
 }
 
 /// Outcome of checking a fetched release zip against the pinned hashes.
@@ -1120,8 +1131,19 @@ mod tests {
         let h = "5865360c3295038f0ff979d303bb7eb9437eec09fbc08686967d3b5d41d9c019";
         assert_eq!(pinned_release_hash(Some("0.4.0")), Some(h));
         assert_eq!(pinned_release_hash(Some("v0.4.0")), Some(h));
+        let h41 = "7230131637617ede9dc45c552244ddb814ae70098406e102fc254d52bcdb6e14";
+        assert_eq!(pinned_release_hash(Some("0.4.1")), Some(h41));
+        assert_eq!(pinned_release_hash(Some("v0.4.1")), Some(h41));
         assert_eq!(pinned_release_hash(Some("9.9.9")), None);
         assert_eq!(pinned_release_hash(None), None);
+    }
+
+    #[test]
+    fn is_pinned_version_is_true_only_for_known_versions() {
+        assert!(is_pinned_version("0.4.1"));
+        assert!(is_pinned_version("v0.4.1"));
+        assert!(!is_pinned_version("0.4.2"));
+        assert!(!is_pinned_version(""));
     }
 
     #[test]

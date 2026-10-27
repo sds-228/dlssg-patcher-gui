@@ -1279,6 +1279,14 @@ impl DlssgApp {
                                     ui.colored_label(MUTED, format!("upstream v{}{pushed}", u.remote_version));
                                 }
                             }
+                            let is_update = local
+                                .as_ref()
+                                .is_some_and(|lv| version_cmp(&u.remote_version, lv).is_gt());
+                            if is_update && !crate::download::is_pinned_version(&u.remote_version) {
+                                ui.colored_label(WARN, "unverified build").on_hover_text(
+                                    "No pinned SHA-256 exists for this upstream release yet; the download is accepted but cannot be verified.",
+                                );
+                            }
                         }
                     }
                 }
