@@ -310,13 +310,33 @@ pub fn pick_hybrid_gpu(adapters: &[Adapter]) -> Option<(String, Arch, Option<Str
         .map(|(name, arch)| (name, arch, igpu.clone()))
 }
 
-/// Soft guidance on driver version. dlssg_for_sm86 declares a tested driver, not a minimum.
+/// NVIDIA driver major, accepting both vendor (`617.14`) and WDDM
+/// (`31.0.15.3699` -> last five digits `53699` -> 536) forms.
+pub fn driver_major(driver: &str) -> Option<i64> {
+    let t = driver.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = t.split('.').collect();
+    if parts.len() >= 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    {
+        let digits = parts.concat();
+        let tail = &digits[digits.len().saturating_sub(5)..];
+        return tail.parse::<i64>().ok().map(|n| n / 100);
+    }
+    parts.first()?.parse().ok()
+}
+
+/// Soft guidance on the driver version. 0.4.1 hard-refuses anything below R580.
 pub fn driver_note(driver: &str) -> Option<&'static str> {
-    let major = driver.split('.').next()?.parse::<i64>().ok()?;
-    if major < 500 {
-        Some("Very old driver. Frame generation needs a recent NVIDIA driver. Update via GeForce Experience / NVIDIA App.")
-    } else if major < 550 {
-        Some("Older driver. dlssg_for_sm86 was validated on 591.86; update if you hit issues.")
+    let major = driver_major(driver)?;
+    if major < 580 {
+        Some("Driver is below the R580 floor required by dlssg_for_sm86 0.4.1; frame generation will be refused. Update your NVIDIA driver.")
+    } else if major < 591 {
+        Some("Driver meets the R580 floor; dlssg_for_sm86 is validated on 591.86 and newer. Update if you hit issues.")
     } else {
         None
     }
@@ -499,5 +519,24 @@ mod tests {
             instance_id: r"PCI\VEN_1002&DEV_1638&SUBSYS_16221043&REV_C4\4&12C9051D&0&0041".into(),
         }];
         assert!(pick_hybrid_gpu(&adapters).is_none());
+    }
+
+    #[test]
+    fn driver_major_understands_nvidia_and_wddm_forms() {
+        assert_eq!(driver_major("617.14"), Some(617));
+        assert_eq!(driver_major("580.10"), Some(580));
+        assert_eq!(driver_major("31.0.15.3699"), Some(536));
+        assert_eq!(driver_major("31.0.15.6141"), Some(561));
+        assert_eq!(driver_major(""), None);
+        assert_eq!(driver_major("unknown"), None);
+    }
+
+    #[test]
+    fn driver_note_enforces_the_r580_floor() {
+        assert!(driver_note("31.0.15.3699").unwrap().contains("R580"));
+        assert!(driver_note("579.99").unwrap().contains("R580"));
+        assert!(driver_note("580.10").unwrap().contains("meets"));
+        assert!(driver_note("591.86").is_none());
+        assert!(driver_note("617.14").is_none());
     }
 }

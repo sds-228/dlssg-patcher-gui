@@ -1341,9 +1341,9 @@ impl DlssgApp {
                                 .map(|m| format!("{:.0} GB", m as f64 / 1024.0))
                                 .unwrap_or_else(|| "?".into());
                             ui.colored_label(SUCCESS, format!("{} · {vram} · driver {} · {}", g.name, g.driver, arch_label));
-                            if let Some(note) = driver_note(&g.driver) {
-                                ui.colored_label(WARN, note);
-                            }
+                        }
+                        if let Some(note) = driver_note(&g.driver) {
+                            ui.colored_label(WARN, note);
                         }
                     }
                 }
