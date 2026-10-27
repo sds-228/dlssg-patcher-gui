@@ -218,6 +218,8 @@ pub fn install(req: &InstallRequest) -> Result<PatchRecord, String> {
         installed_at_unix: unix_seconds(),
         proxy_sha256: proxy_sha,
         mod_version: req.mod_version.clone(),
+        settings: None,
+        sr_installed: false,
     })
 }
 
@@ -710,6 +712,8 @@ mod tests {
             installed_at_unix: 0,
             proxy_sha256: proxy_hash,
             mod_version: Some("0.2.4".into()),
+            settings: None,
+            sr_installed: false,
         };
 
         let report = uninstall(&rec).expect("uninstall");
@@ -1087,6 +1091,8 @@ mod tests {
             installed_at_unix: 0,
             proxy_sha256: proxy_hash,
             mod_version: Some("0.2.4".into()),
+            settings: None,
+            sr_installed: false,
         };
         let mut state = State::default();
         state.patches.push(rec);
@@ -1354,6 +1360,8 @@ mod tests {
             installed_at_unix: 0,
             proxy_sha256: proxy_hash,
             mod_version: Some("0.4.0".into()),
+            settings: None,
+            sr_installed: false,
         };
         assert!(looks_patched(&rec), "with the runtime tree present the patch is live");
         fs::remove_dir_all(&rt).unwrap();
@@ -1438,6 +1446,8 @@ mod tests {
             installed_at_unix: 0,
             proxy_sha256: "deadbeef".into(),
             mod_version: None,
+            settings: None,
+            sr_installed: false,
         };
         relink_record(&mut rec, Path::new(r"D:\new\game\bin\Game.exe"));
         assert_eq!(

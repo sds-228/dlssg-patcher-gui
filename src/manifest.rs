@@ -148,6 +148,147 @@ pub fn find_manifest_game_by_appid<'a>(
     find_manifest_game(manifest, folder_name)
 }
 
+/// Values upstream 0.4.1 accepts for the per-game knobs. Anything else is a
+/// 0.4.0-era or hand-edited value and is dropped during normalization.
+pub const ENGINES: &[&str] = &["DLSS", "XeSS"];
+pub const PRESETS: &[&str] = &["A", "B", "C"];
+pub const SR_MODES: &[&str] = &["Off", "M-INT8", "L-INT8", "M-FP16", "L-FP16"];
+pub const FLOW_RESOLUTIONS: &[&str] = &["Coarse", "Middle", "Fine", "CoarseAt4K"];
+pub const HUDLESS_VALUES: &[&str] = &["Auto", "1", "0"];
+
+/// Largest `MaxGeneratedFrames` (frames generated per rendered frame). 5 = 6X.
+pub const MAX_MULTIPLIER: u8 = 5;
+/// XeSS-FG tops out at 3 generated frames (4X).
+pub const XESS_MAX_MULTIPLIER: u8 = 3;
+
+/// Per-game configuration for the 0.4.1 knobs. `None` means "factory default"
+/// for that key: the patcher then leaves the upstream INI value alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModSettings {
+    pub engine: Option<String>,
+    pub max_generated_frames: Option<u8>,
+    pub preset: Option<String>,
+    pub optimized: Option<u8>,
+    pub sr_mode: Option<String>,
+    pub flow_resolution: Option<String>,
+    pub use_hudless: Option<String>,
+    /// State-only: copy `dlssg_sm86/sr/` for this game. Not an INI key.
+    #[serde(default)]
+    pub install_sr: bool,
+}
+
+impl ModSettings {
+    /// Drop values 0.4.1 does not accept and clamp frame counts, reporting each
+    /// change so a migration can be logged rather than silently applied.
+    pub fn normalized(mut self) -> (Self, Vec<String>) {
+        let mut notes = Vec::new();
+
+        self.engine = canonical(self.engine, ENGINES, "Engine", &mut notes);
+        self.preset = canonical(self.preset, PRESETS, "Preset", &mut notes);
+        self.flow_resolution = canonical(
+            self.flow_resolution,
+            FLOW_RESOLUTIONS,
+            "FlowResolution",
+            &mut notes,
+        );
+        self.use_hudless = canonical(self.use_hudless, HUDLESS_VALUES, "UseHudless", &mut notes);
+
+        let xess = self.engine.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("XeSS"));
+        let ceiling = if xess { XESS_MAX_MULTIPLIER } else { MAX_MULTIPLIER };
+        if let Some(n) = self.max_generated_frames {
+            let clamped = n.clamp(1, ceiling);
+            if clamped != n {
+                notes.push(if xess && n > ceiling {
+                    format!(
+                        "MaxGeneratedFrames={n} exceeds the XeSS limit; clamped to {clamped} ({}X).",
+                        clamped + 1
+                    )
+                } else {
+                    format!("MaxGeneratedFrames={n} is out of range; clamped to {clamped}.")
+                });
+                self.max_generated_frames = Some(clamped);
+            }
+        }
+
+        if let Some(n) = self.optimized {
+            if n > 3 {
+                notes.push(format!("Optimized={n} is not a 0.4.1 value; ignoring it."));
+                self.optimized = None;
+            }
+        }
+
+        if let Some(mode) = self.sr_mode.clone() {
+            match SR_MODES.iter().find(|v| v.eq_ignore_ascii_case(&mode)) {
+                Some(v) => {
+                    self.sr_mode = Some((*v).to_string());
+                    if !v.eq_ignore_ascii_case("Off") {
+                        self.install_sr = true;
+                    }
+                }
+                None => {
+                    notes.push(format!(
+                        "SuperResolution Mode={mode} is not a 0.4.1 value; ignoring it."
+                    ));
+                    self.sr_mode = None;
+                }
+            }
+        }
+
+        (self, notes)
+    }
+
+    /// Engine label for the UI; factory default is DLSS.
+    pub fn engine_name(&self) -> &str {
+        self.engine.as_deref().unwrap_or("DLSS")
+    }
+
+    /// Frames generated per rendered frame; upstream's default is 3 (4X).
+    pub fn multiplier(&self) -> u8 {
+        self.max_generated_frames.unwrap_or(3)
+    }
+
+    /// True when the selected mode actually needs the ~180 MB SR payload.
+    pub fn sr_enabled(&self) -> bool {
+        self.sr_mode
+            .as_deref()
+            .is_some_and(|m| !m.eq_ignore_ascii_case("Off"))
+    }
+
+    /// One-line summary for the row tooltip, e.g. `XeSS · 3X · SR L-INT8`.
+    pub fn summary(&self) -> String {
+        let mut parts = vec![
+            self.engine_name().to_string(),
+            format!("{}X", self.multiplier() + 1),
+        ];
+        if let Some(p) = &self.preset {
+            parts.push(format!("Preset {p}"));
+        }
+        if self.sr_enabled() {
+            if let Some(m) = &self.sr_mode {
+                parts.push(format!("SR {m}"));
+            }
+        }
+        parts.join(" · ")
+    }
+}
+
+/// Canonical spelling for a whitelisted value, or `None` plus a note.
+fn canonical(
+    value: Option<String>,
+    allowed: &[&str],
+    label: &str,
+    notes: &mut Vec<String>,
+) -> Option<String> {
+    let v = value?;
+    match allowed.iter().find(|a| a.eq_ignore_ascii_case(&v)) {
+        Some(a) => Some((*a).to_string()),
+        None => {
+            notes.push(format!("{label}={v} is not a 0.4.1 value; ignoring it."));
+            None
+        }
+    }
+}
+
 /// Persistent app state: which games are patched, plus manually added games.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct State {
@@ -164,6 +305,10 @@ pub struct State {
     /// while the folder stays meaningful).
     #[serde(default)]
     pub proxy_overrides: std::collections::HashMap<String, String>,
+    /// Per-game 0.4.1 settings, keyed the same way as `proxy_overrides`. Kept
+    /// across unpatch so a later repatch reapplies the user's choices.
+    #[serde(default)]
+    pub mod_settings: std::collections::HashMap<String, ModSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +325,12 @@ pub struct PatchRecord {
     /// dlssg_for_sm86 version that was used at patch time (e.g. "0.2.4").
     #[serde(default)]
     pub mod_version: Option<String>,
+    /// Settings this patch was written with, for display and migration.
+    #[serde(default)]
+    pub settings: Option<ModSettings>,
+    /// Whether the `sr/` payload was copied into the game folder.
+    #[serde(default)]
+    pub sr_installed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +398,20 @@ impl State {
 
     pub fn proxy_override_for(&self, install_dir: &str) -> Option<&str> {
         self.proxy_overrides.get(&exe_key(install_dir)).map(|s| s.as_str())
+    }
+
+    /// Per-game settings for `install_dir`, if the user ever configured them.
+    pub fn mod_settings_for(&self, install_dir: &str) -> Option<&ModSettings> {
+        self.mod_settings.get(&exe_key(install_dir))
+    }
+
+    pub fn set_mod_settings(&mut self, install_dir: &str, settings: ModSettings) {
+        self.mod_settings.insert(exe_key(install_dir), settings);
+    }
+
+    /// Forget a game's settings; true when an entry existed.
+    pub fn clear_mod_settings(&mut self, install_dir: &str) -> bool {
+        self.mod_settings.remove(&exe_key(install_dir)).is_some()
     }
 }
 
@@ -408,6 +573,64 @@ mod tests {
         assert_eq!(ac("Cyberpunk 2077"), None);
     }
 
+    #[test]
+    fn old_state_json_without_mod_settings_still_loads() {
+        let s: State = serde_json::from_str(r#"{"patches":[],"manual_games":[]}"#).unwrap();
+        assert!(s.mod_settings.is_empty());
+    }
+
+    #[test]
+    fn mod_settings_are_keyed_case_insensitively() {
+        let mut s = State::default();
+        s.set_mod_settings(
+            r"C:\Games\Foo",
+            ModSettings { preset: Some("B".into()), ..Default::default() },
+        );
+        assert_eq!(s.mod_settings_for(r"c:\games\foo").unwrap().preset.as_deref(), Some("B"));
+        assert!(s.clear_mod_settings(r"C:\GAMES\FOO"));
+        assert!(s.mod_settings_for(r"C:\Games\Foo").is_none());
+    }
+
+    #[test]
+    fn normalized_drops_legacy_values_and_clamps_xess() {
+        let (s, notes) = ModSettings {
+            engine: Some("XeSS".into()),
+            max_generated_frames: Some(5),
+            preset: Some("Auto".into()),
+            sr_mode: Some("On".into()),
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(s.engine.as_deref(), Some("XeSS"));
+        assert_eq!(s.max_generated_frames, Some(3));
+        assert_eq!(s.preset, None);
+        assert_eq!(s.sr_mode, None);
+        assert!(!s.install_sr);
+        assert_eq!(notes.len(), 3);
+    }
+
+    #[test]
+    fn a_real_sr_mode_implies_the_sr_files() {
+        let (s, _) = ModSettings { sr_mode: Some("L-INT8".into()), ..Default::default() }.normalized();
+        assert!(s.install_sr);
+    }
+
+    #[test]
+    fn summary_formats_default_and_configured_settings() {
+        assert_eq!(ModSettings::default().summary(), "DLSS · 4X");
+        assert_eq!(
+            ModSettings {
+                engine: Some("XeSS".into()),
+                max_generated_frames: Some(2),
+                sr_mode: Some("L-INT8".into()),
+                install_sr: true,
+                ..Default::default()
+            }
+            .summary(),
+            "XeSS · 3X · SR L-INT8"
+        );
+    }
+
     fn record(exe: &str) -> PatchRecord {
         PatchRecord {
             game_name: "Game".into(),
@@ -420,6 +643,8 @@ mod tests {
             installed_at_unix: 0,
             proxy_sha256: "abc".into(),
             mod_version: None,
+            settings: None,
+            sr_installed: false,
         }
     }
 
