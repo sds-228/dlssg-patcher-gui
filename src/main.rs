@@ -6,6 +6,7 @@ mod download;
 mod gpu;
 mod launchers;
 mod manifest;
+mod modini;
 mod patcher;
 mod steam;
 mod winutil;
