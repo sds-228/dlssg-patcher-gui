@@ -2260,6 +2260,10 @@ impl DlssgApp {
             state_dir: self.state_dir.clone(),
             mod_version,
             previous_record: self.state.patch_for_exe(&exe.to_string_lossy()).cloned(),
+            // Task 7 replaces these with the per-game settings and SR pre-step.
+            settings: Default::default(),
+            sr: false,
+            reset_to_factory: false,
         };
         self.spawn(move || match patcher::install(&req) {
             Ok(rec) => Msg::Patched(Box::new(rec)),
