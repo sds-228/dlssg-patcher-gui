@@ -226,6 +226,9 @@ pub const RUNTIME_REQUIRED: &[&str] = &[
 /// Super-resolution payload: release-zip only (~180 MB) and `Mode=Off` by default.
 pub const RUNTIME_SR_DIR: &str = "sr";
 
+/// The files an installed `sr/` tree must contain for Super Resolution to work.
+pub const RUNTIME_SR_REQUIRED: &[&str] = &["sr/nvngx_dlss.dll", "sr/sr_kernels.dll"];
+
 /// Cache sidecar that records which dlssg_for_sm86 version we are on. The
 /// upstream INI no longer carries a "; Native x.y.z" header, so the version is
 /// persisted here after a download and reused on later (offline) launches.
@@ -674,6 +677,36 @@ pub fn is_runtime_dir_usable(dir: &Path) -> bool {
     dir.is_dir() && RUNTIME_REQUIRED.iter().all(|rel| is_usable(&dir.join(rel)))
 }
 
+/// True when `runtime_dir` holds a complete Super Resolution payload.
+pub fn sr_is_usable(runtime_dir: &Path) -> bool {
+    RUNTIME_SR_REQUIRED.iter().all(|rel| is_usable(&runtime_dir.join(rel)))
+}
+
+/// True when `runtime_dir` holds an SR payload fetched for exactly `version`.
+fn sr_cache_ready(runtime_dir: &Path, version: &str) -> bool {
+    sr_is_usable(runtime_dir)
+        && std::fs::read_to_string(runtime_dir.join(RUNTIME_SR_DIR).join(VERSION_FILE))
+            .ok()
+            .is_some_and(|v| v.trim() == version)
+}
+
+/// Drop `runtime/sr` when its recorded version differs from the cached core
+/// version, so files from an older bundle are never reused.
+fn invalidate_stale_sr(cache: &Path) {
+    let runtime = cache.join(RUNTIME_DIR_NAME);
+    let sr = runtime.join(RUNTIME_SR_DIR);
+    if !sr.is_dir() {
+        return;
+    }
+    let Some(core) = cached_mod_version(cache) else { return };
+    let sr_ver = std::fs::read_to_string(sr.join(VERSION_FILE))
+        .ok()
+        .map(|s| s.trim().to_string());
+    if sr_ver.as_deref() != Some(core.as_str()) {
+        let _ = std::fs::remove_dir_all(&sr);
+    }
+}
+
 /// True when the cache can patch a game without touching the network: all six proxies,
 /// the INI, and a complete runtime tree. A 0.3.5-era cache fails this by construction,
 /// so an upgrade fetches the 0.4.0 bundle on launch.
@@ -758,6 +791,7 @@ pub fn ensure_mod_files(
         if let Some(cb) = &progress {
             cb("Mod files already cached".to_string());
         }
+        invalidate_stale_sr(&cache);
         return Ok(ModFiles {
             source: FileSource::Cached,
             version: cached_mod_version(&cache),
@@ -960,11 +994,109 @@ pub fn ensure_mod_files(
         cb(format!("Total: {} file(s) fetched", downloaded.len() + usize::from(fetched_from_zip)));
     }
 
+    invalidate_stale_sr(&cache);
     Ok(ModFiles {
         source,
         version,
         cache_dir: cache,
     })
+}
+
+/// Fetch the optional Super Resolution payload for the bundle already in the
+/// cache. Pinned to the cached version — never "latest" — so a per-game SR
+/// install cannot silently mix files from two bundles.
+pub fn ensure_sr_files(
+    cache_root: &Path,
+    local_dirs: &[PathBuf],
+    progress: Option<Box<dyn Fn(String) + Send>>,
+) -> Result<(), String> {
+    let cache = cache_root.join("cache");
+    let runtime = cache.join(RUNTIME_DIR_NAME);
+    let Some(version) = cached_mod_version(&cache) else {
+        return Err("mod files are not cached yet; refresh them first".into());
+    };
+
+    if sr_cache_ready(&runtime, &version) {
+        if let Some(cb) = &progress {
+            cb("Super Resolution files already cached".to_string());
+        }
+        return Ok(());
+    }
+
+    if let Some(cb) = &progress {
+        cb(format!(
+            "Fetching Super Resolution payload for dlssg_for_sm86 {version} (~180 MB)…"
+        ));
+    }
+
+    /// Verify a freshly extracted tree, then record which bundle it belongs to.
+    fn finish(cache: &Path, version: &str) -> Result<(), String> {
+        let runtime = cache.join(RUNTIME_DIR_NAME);
+        if !sr_is_usable(&runtime) {
+            return Err(format!(
+                "release zip did not contain a complete {RUNTIME_SR_DIR}/ payload ({RUNTIME_SR_REQUIRED:?})"
+            ));
+        }
+        std::fs::write(runtime.join(RUNTIME_SR_DIR).join(VERSION_FILE), version)
+            .map_err(|e| format!("write {RUNTIME_SR_DIR}/{VERSION_FILE}: {e}"))
+    }
+
+    let mut last_err = String::from("no download source resolved");
+    for url in zip_urls(Some(&version), Some(&version)) {
+        match fetch_zip_with_stall(&url, &progress) {
+            Ok(bytes) => {
+                if verify_release_zip(PINNED_RELEASE_SHA256, Some(&version), &bytes)
+                    == ZipTrust::Mismatch
+                {
+                    last_err = format!("{url}: sha256 mismatch");
+                    eprintln!("[dlssg-patcher] SR zip sha256 mismatch for {url}; refusing");
+                    continue;
+                }
+                match extract_release_zip(&bytes, &cache, true).and_then(|_| finish(&cache, &version)) {
+                    Ok(()) => {
+                        if let Some(cb) = &progress {
+                            cb(format!("Installed Super Resolution files for {version}"));
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => last_err = format!("{url}: {e}"),
+                }
+            }
+            Err(e) => last_err = format!("{url}: {e}"),
+        }
+    }
+
+    // Offline fallback: a release zip the user keeps in one of the local folders.
+    if let Some(zip_path) = find_local_zip(local_dirs) {
+        match std::fs::read(&zip_path) {
+            Ok(bytes) => {
+                if verify_release_zip(PINNED_RELEASE_SHA256, Some(&version), &bytes)
+                    == ZipTrust::Mismatch
+                {
+                    last_err = format!("{}: sha256 mismatch", zip_path.display());
+                } else {
+                    match extract_release_zip(&bytes, &cache, true)
+                        .and_then(|_| finish(&cache, &version))
+                    {
+                        Ok(()) => {
+                            if let Some(cb) = &progress {
+                                cb(format!("Installed Super Resolution files for {version}"));
+                            }
+                            return Ok(());
+                        }
+                        Err(e) => last_err = format!("{}: {e}", zip_path.display()),
+                    }
+                }
+            }
+            Err(e) => last_err = format!("{}: {e}", zip_path.display()),
+        }
+    }
+
+    Err(format!(
+        "could not fetch the ~180 MB Super Resolution payload for dlssg_for_sm86 {version} \
+         (needs {} and {}): {last_err}",
+        RUNTIME_SR_REQUIRED[0], RUNTIME_SR_REQUIRED[1]
+    ))
 }
 
 /// A cached/bundled file is usable if it is non-trivial and, for a DLL, actually a
@@ -1035,8 +1167,25 @@ pub fn extract_release_zip(bytes: &[u8], cache: &Path, include_sr: bool) -> Resu
     let proxy_dir = cache.join("proxy");
     std::fs::create_dir_all(&proxy_dir).map_err(|e| format!("create {}: {e}", proxy_dir.display()))?;
     // Start from a clean tree: a stale runtime folder from a 0.3.x-era or older-0.4.x
-    // layout must never be merged with the one we are about to write.
-    let _ = std::fs::remove_dir_all(cache.join(RUNTIME_DIR_NAME));
+    // layout must never be merged with the one we are about to write. A core-only
+    // refresh (`include_sr = false`) keeps an existing `sr/` payload: it belongs to
+    // this cache and is version-checked by `invalidate_stale_sr` / `sr_cache_ready`.
+    let runtime_dir = cache.join(RUNTIME_DIR_NAME);
+    if include_sr {
+        let _ = std::fs::remove_dir_all(&runtime_dir);
+    } else if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy() == RUNTIME_SR_DIR {
+                continue;
+            }
+            let p = entry.path();
+            let _ = if p.is_dir() {
+                std::fs::remove_dir_all(&p)
+            } else {
+                std::fs::remove_file(&p)
+            };
+        }
+    }
 
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|e| format!("open release zip: {e}"))?;
@@ -1306,6 +1455,10 @@ mod tests {
     #[test]
     fn extract_routes_the_0_4_0_layout_and_skips_the_rest() {
         let dir = tmp();  // fresh temp dir
+        // A per-game SR payload copied earlier by `ensure_sr_files` must survive a core refresh.
+        let keep = dir.join("dlssg_sm86/sr/keep.dll");
+        std::fs::create_dir_all(keep.parent().unwrap()).unwrap();
+        std::fs::write(&keep, pe_bytes(128)).unwrap();
         let zip = tiny_zip(&[
             ("version.dll", b"MZ-version"),
             ("alternatives/winmm.dll", b"MZ-winmm"),
@@ -1323,9 +1476,63 @@ mod tests {
         assert!(dir.join("dlssg_sm86.ini").is_file());
         assert!(dir.join("dlssg_sm86/runtime/nvngx_dlssg.dll").is_file());
         assert!(dir.join("dlssg_sm86/backend/sm86_backend.dll").is_file());
-        assert!(!dir.join("dlssg_sm86/sr").exists(), "sr/ must not land when include_sr = false");
+        assert!(!dir.join("dlssg_sm86/sr/sr_kernels.dll").exists(), "sr/ must not land when include_sr = false");
+        assert!(keep.is_file(), "a core refresh must preserve an existing sr/ tree");
         assert!(!dir.join("docs").exists());
         assert!(!dir.join("README.md").exists());
+    }
+
+    #[test]
+    fn sr_is_usable_requires_both_pe_files() {
+        let dir = tmp().join(RUNTIME_DIR_NAME);
+        assert!(!sr_is_usable(&dir));
+        for rel in RUNTIME_SR_REQUIRED {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, pe_bytes(4096)).unwrap();
+        }
+        assert!(sr_is_usable(&dir));
+        std::fs::remove_file(dir.join(RUNTIME_SR_REQUIRED[1])).unwrap();
+        assert!(!sr_is_usable(&dir));
+    }
+
+    #[test]
+    fn sr_cache_requires_the_matching_version_sidecar() {
+        let dir = tmp().join(RUNTIME_DIR_NAME);
+        for rel in RUNTIME_SR_REQUIRED {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, pe_bytes(4096)).unwrap();
+        }
+        std::fs::write(dir.join(RUNTIME_SR_DIR).join(VERSION_FILE), "0.4.0").unwrap();
+        assert!(!sr_cache_ready(&dir, "0.4.1"));
+        assert!(sr_cache_ready(&dir, "0.4.0"));
+    }
+
+    #[test]
+    fn sr_download_urls_are_pinned_to_the_cached_version() {
+        let urls = zip_urls(Some("0.4.1"), Some("0.4.1"));
+        assert!(!urls.is_empty());
+        assert!(urls.iter().all(|u| u.contains("/0.4.1/") || u.contains("/v0.4.1/")));
+        assert!(!urls.iter().any(|u| u.contains("latest")));
+    }
+
+    #[test]
+    fn sr_fetch_without_a_cached_bundle_fails_with_a_clear_message() {
+        let err = ensure_sr_files(&tmp(), &[], None).unwrap_err();
+        assert!(err.contains("cached"), "error must say the mod files are not cached: {err}");
+    }
+
+    #[test]
+    fn a_version_change_drops_a_stale_sr_tree() {
+        let root = tmp();
+        let cache = root.join("cache");
+        let sr = cache.join(RUNTIME_DIR_NAME).join(RUNTIME_SR_DIR);
+        std::fs::create_dir_all(&sr).unwrap();
+        std::fs::write(sr.join(VERSION_FILE), "0.4.0").unwrap();
+        write_cached_version(&cache, "0.4.1");
+        invalidate_stale_sr(&cache);
+        assert!(!sr.exists());
     }
 
     #[test]
