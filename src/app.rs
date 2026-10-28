@@ -11,7 +11,8 @@ use crate::download::{
 use crate::gpu::{driver_note, query_gpu, Arch, GpuInfo};
 use crate::manifest::{
     exe_key, find_manifest_game, find_manifest_game_by_appid, load_manifest_reporting, load_state,
-    save_state, ManualGame, Manifest, ManifestGame, ModSettings, PatchRecord, State,
+    save_state, ManualGame, Manifest, ManifestGame, MAX_MULTIPLIER, ModSettings, PatchRecord, State,
+    XESS_MAX_MULTIPLIER,
 };
 use crate::patcher::{self, InstallRequest};
 use crate::anticheat;
@@ -332,6 +333,11 @@ pub struct DlssgApp {
     /// install only proceeds after an explicit "Patch anyway".
     patch_confirm: Option<Row>,
 
+    // Config modal state.
+    config_target: Option<Row>,
+    config_draft: ModSettings,
+    config_reset: bool,
+
     // Whether each patched render exe currently has our files on disk. Rebuilt
     // only when patches change: computing it per frame would hash the 15 MB proxy
     // DLL for every row and stall the UI.
@@ -354,6 +360,11 @@ enum SortMode {
     /// section at the top of the table regardless of the chosen order, so offering
     /// it in the dropdown did nothing.
     Compatible,
+}
+
+/// Map the user-facing generated-frames value to a human-readable multiplier.
+pub(crate) fn multiplier_label(frames: u8) -> String {
+    format!("{}X", frames + 1)
 }
 
 impl SortMode {
@@ -453,6 +464,9 @@ impl DlssgApp {
             eraser_confirm: false,
             show_about: false,
             patch_confirm: None,
+            config_target: None,
+            config_draft: ModSettings::default(),
+            config_reset: false,
             patch_ready: HashMap::new(),
             patch_ready_dirty: true,
             rows_cache: Vec::new(),
@@ -1212,6 +1226,335 @@ impl eframe::App for DlssgApp {
                     });
                 });
         }
+
+        if let Some(row) = self.config_target.clone() {
+            self.config_modal(ctx, row);
+        }
+    }
+}
+
+/// ---------------------------------------------------------------- Helper methods
+
+impl DlssgApp {
+    /// Open the Config modal for a game row.
+    fn open_config(&mut self, row: Row) {
+        let key = row.install_dir.to_string_lossy().to_string();
+        let mut settings = self.state.mod_settings_for(&key).cloned().unwrap_or_default();
+        if row
+            .render_exe
+            .as_ref()
+            .and_then(|e| self.state.patch_for_exe(&e.to_string_lossy()))
+            .is_some_and(|r| r.sr_installed)
+        {
+            settings.install_sr = true;
+        }
+        self.config_draft = settings;
+        self.config_reset = false;
+        self.config_target = Some(row);
+    }
+
+    /// Render the per-game Config modal.
+    fn config_modal(&mut self, ctx: &egui::Context, row: Row) {
+        let version = self.files.as_ref().and_then(|r| r.as_ref().ok()).and_then(|f| f.version.as_deref());
+        let locked = config_locked(version);
+
+        egui::Modal::new(egui::Id::new("config_modal"))
+            .backdrop_color(egui::Color32::from_black_alpha(190))
+            .frame(
+                egui::Frame::popup(&ctx.style())
+                    .fill(CARD)
+                    .stroke(egui::Stroke::new(1.0_f32, BORDER))
+                    .inner_margin(egui::Margin::symmetric(18, 14)),
+            )
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+
+                ui.label(
+                    egui::RichText::new("Mod Settings")
+                        .strong()
+                        .size(16.0)
+                        .color(TEXT),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&row.name).color(MUTED));
+                    if locked {
+                        ui.label(egui::RichText::new("•").color(WARN));
+                    }
+                });
+
+                let draft = &mut self.config_draft;
+
+                if locked {
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new("Update mod files to v0.4.1 to configure Engine, Preset and Super Resolution.")
+                                .color(MUTED),
+                        );
+                    });
+                    ui.add_space(8.0);
+                    if add_toned_button(ui, BtnTone::AccentFill, "Update mod files", None).clicked() {
+                        self.refresh_files(true);
+                    }
+                } else {
+                    // Engine
+                    let engines = vec!["Factory".to_string(), "DLSS".to_string(), "XeSS".to_string()];
+                    let engine_idx = match &draft.engine {
+                        Some(e) if e.eq_ignore_ascii_case("DLSS") => 1,
+                        Some(e) if e.eq_ignore_ascii_case("XeSS") => 2,
+                        _ => 0,
+                    };
+                    // Engine
+                    let mut engine_idx = engine_idx;
+                    egui::ComboBox::from_id_salt("engine_combo")
+                        .selected_text(&engines[engine_idx])
+                        .show_ui(ui, |cb| {
+                            for (i, name) in engines.iter().enumerate() {
+                                cb.selectable_value(&mut engine_idx, i, name.clone());
+                            }
+                        });
+                    draft.engine = match engine_idx {
+                        1 => Some("DLSS".to_string()),
+                        2 => {
+                            // Clamp frames for XeSS
+                            if let Some(n) = draft.max_generated_frames {
+                                if n > XESS_MAX_MULTIPLIER {
+                                    draft.max_generated_frames = Some(XESS_MAX_MULTIPLIER);
+                                }
+                            }
+                            Some("XeSS".to_string())
+                        }
+                        _ => None,
+                    };
+
+                    // Multiplier
+                    let xess = draft.engine.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("XeSS"));
+                    let max_frames = if xess { XESS_MAX_MULTIPLIER + 1 } else { MAX_MULTIPLIER + 1 };
+                    let current_frames = draft.max_generated_frames.unwrap_or(3);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Multiplier:").color(MUTED));
+                        let mut mult_idx = current_frames;
+                        egui::ComboBox::from_id_salt("multiplier_combo")
+                            .selected_text(multiplier_label(mult_idx))
+                            .show_ui(ui, |cb| {
+                                for f in 1..=max_frames as u8 {
+                                    cb.selectable_value(&mut mult_idx, f, multiplier_label(f));
+                                }
+                            });
+                        draft.max_generated_frames = Some(mult_idx);
+                        if xess {
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new("XeSS supports up to 4X").color(MUTED).size(11.0));
+                        }
+                    });
+
+                    // Preset + Optimized (DLSS only)
+                    let presets = vec!["Factory".to_string(), "Optimized".to_string(), "A".to_string(), "B".to_string(), "C".to_string()];
+                    let preset_idx = match &draft.preset {
+                        Some(p) if p.eq_ignore_ascii_case("A") => 2,
+                        Some(p) if p.eq_ignore_ascii_case("B") => 3,
+                        Some(p) if p.eq_ignore_ascii_case("C") => 4,
+                        _ => 0,
+                    };
+
+                    let optimized_vals = vec!["Factory".to_string(), "Optimized".to_string(), "1".to_string(), "2".to_string(), "3".to_string()];
+                    let opt_idx = match &draft.optimized {
+                        Some(0) => 1,
+                        Some(1) => 2,
+                        Some(2) => 3,
+                        Some(3) => 4,
+                        _ => 0,
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Preset:").color(MUTED));
+                        let disabled = draft.engine.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("XeSS"));
+                        ui.add_enabled_ui(!disabled, |ui| {
+                            let mut preset_idx = preset_idx;
+                            egui::ComboBox::from_id_salt("preset_combo")
+                                .selected_text(&presets[preset_idx])
+                                .show_ui(ui, |cb| {
+                                    for (i, name) in presets.iter().enumerate() {
+                                        cb.selectable_value(&mut preset_idx, i, name.clone());
+                                    }
+                                });
+                            draft.preset = match preset_idx {
+                                1 => Some("Optimized".to_string()),
+                                2 => Some("A".to_string()),
+                                3 => Some("B".to_string()),
+                                4 => Some("C".to_string()),
+                                _ => None,
+                            };
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Optimized:").color(MUTED));
+                        let disabled = draft.engine.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("XeSS"));
+                        ui.add_enabled_ui(!disabled, |ui| {
+                            let mut opt_idx = opt_idx;
+                            egui::ComboBox::from_id_salt("optimized_combo")
+                                .selected_text(&optimized_vals[opt_idx])
+                                .show_ui(ui, |cb| {
+                                    for (i, name) in optimized_vals.iter().enumerate() {
+                                        cb.selectable_value(&mut opt_idx, i, name.clone());
+                                    }
+                                });
+                            draft.optimized = match opt_idx {
+                                1 => Some(0),
+                                2 => Some(1),
+                                3 => Some(2),
+                                4 => Some(3),
+                                _ => None,
+                            };
+                        });
+                    });
+
+                    if draft.engine.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("XeSS")) {
+                        ui.label(egui::RichText::new("Preset and Optimized only apply to the DLSS engine.").color(MUTED).size(11.0));
+                    }
+
+                    // SR Mode
+                    let sr_modes = vec!["Factory".to_string(), "Off".to_string(), "M-INT8".to_string(), "L-INT8".to_string(), "M-FP16".to_string(), "L-FP16".to_string()];
+                    let sr_idx = match &draft.sr_mode {
+                        Some(m) if m.eq_ignore_ascii_case("Off") => 1,
+                        Some(m) if m.eq_ignore_ascii_case("M-INT8") => 2,
+                        Some(m) if m.eq_ignore_ascii_case("L-INT8") => 3,
+                        Some(m) if m.eq_ignore_ascii_case("M-FP16") => 4,
+                        Some(m) if m.eq_ignore_ascii_case("L-FP16") => 5,
+                        _ => 0,
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Super Resolution Mode:").color(MUTED));
+                        let mut sr_idx = sr_idx;
+                        egui::ComboBox::from_id_salt("sr_mode_combo")
+                            .selected_text(&sr_modes[sr_idx])
+                            .show_ui(ui, |cb| {
+                                for (i, name) in sr_modes.iter().enumerate() {
+                                    cb.selectable_value(&mut sr_idx, i, name.clone());
+                                }
+                            });
+                        draft.sr_mode = match sr_idx {
+                            1 => Some("Off".to_string()),
+                            2 => Some("M-INT8".to_string()),
+                            3 => Some("L-INT8".to_string()),
+                            4 => Some("M-FP16".to_string()),
+                            5 => Some("L-FP16".to_string()),
+                            _ => None,
+                        };
+                    });
+
+                    // SR checkbox
+                    let non_off = draft.sr_mode.as_deref().is_some_and(|m| !m.eq_ignore_ascii_case("Off"));
+                    if non_off {
+                        ui.add_enabled_ui(false, |ui| {
+                            ui.checkbox(&mut draft.install_sr, "Install Super Resolution files (~180 MB)");
+                        });
+                    } else {
+                        ui.checkbox(&mut draft.install_sr, "Install Super Resolution files (~180 MB)");
+                    }
+
+                    // Flow Resolution + UseHudless (XeSS only)
+                    let flow_res = vec!["Factory".to_string(), "Coarse".to_string(), "Middle".to_string(), "Fine".to_string(), "CoarseAt4K".to_string()];
+                    let flow_idx = match &draft.flow_resolution {
+                        Some(f) if f.eq_ignore_ascii_case("Coarse") => 1,
+                        Some(f) if f.eq_ignore_ascii_case("Middle") => 2,
+                        Some(f) if f.eq_ignore_ascii_case("Fine") => 3,
+                        Some(f) if f.eq_ignore_ascii_case("CoarseAt4K") => 4,
+                        _ => 0,
+                    };
+
+                    let hudless = vec!["Factory".to_string(), "Auto".to_string(), "1".to_string(), "0".to_string()];
+                    let hud_idx = match &draft.use_hudless {
+                        Some(u) if u.eq_ignore_ascii_case("Auto") => 1,
+                        Some(u) if u == "1" => 2,
+                        Some(u) if u == "0" => 3,
+                        _ => 0,
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Flow Resolution:").color(MUTED));
+                        let disabled = draft.engine.as_deref().is_none_or(|e| !e.eq_ignore_ascii_case("XeSS"));
+                        ui.add_enabled_ui(!disabled, |ui| {
+                            let mut flow_idx = flow_idx;
+                            egui::ComboBox::from_id_salt("flow_combo")
+                                .selected_text(&flow_res[flow_idx])
+                                .show_ui(ui, |cb| {
+                                    for (i, name) in flow_res.iter().enumerate() {
+                                        cb.selectable_value(&mut flow_idx, i, name.clone());
+                                    }
+                                });
+                            draft.flow_resolution = match flow_idx {
+                                1 => Some("Coarse".to_string()),
+                                2 => Some("Middle".to_string()),
+                                3 => Some("Fine".to_string()),
+                                4 => Some("CoarseAt4K".to_string()),
+                                _ => None,
+                            };
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("UseHudless:").color(MUTED));
+                        let disabled = draft.engine.as_deref().is_none_or(|e| !e.eq_ignore_ascii_case("XeSS"));
+                        ui.add_enabled_ui(!disabled, |ui| {
+                            let mut hud_idx = hud_idx;
+                            egui::ComboBox::from_id_salt("hudless_combo")
+                                .selected_text(&hudless[hud_idx])
+                                .show_ui(ui, |cb| {
+                                    for (i, name) in hudless.iter().enumerate() {
+                                        cb.selectable_value(&mut hud_idx, i, name.clone());
+                                    }
+                                });
+                            draft.use_hudless = match hud_idx {
+                                1 => Some("Auto".to_string()),
+                                2 => Some("1".to_string()),
+                                3 => Some("0".to_string()),
+                                _ => None,
+                            };
+                        });
+                    });
+
+                    if draft.engine.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("XeSS")) ||
+                       draft.flow_resolution.is_some() || draft.use_hudless.is_some() {
+                        ui.label(egui::RichText::new("Only applies to the XeSS engine.").color(MUTED).size(11.0));
+                    }
+
+                    // Buttons
+                    ui.add_space(12.0);
+                    if add_toned_button(ui, BtnTone::AccentFill, "Reset to factory", None).clicked() {
+                        self.config_draft = ModSettings::default();
+                        self.config_reset = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if add_toned_button(ui, BtnTone::AccentFill, "Apply", None).clicked() {
+                            let key = row.install_dir.to_string_lossy().to_string();
+                            if self.config_draft == ModSettings::default() {
+                                self.state.clear_mod_settings(&key);
+                            } else {
+                                self.state.set_mod_settings(&key, self.config_draft.clone());
+                            }
+                            match save_state(&self.state) {
+                                Ok(_) => self.log(format!("Saved mod settings for {}", row.name)),
+                                Err(e) => self.log(format!("Saved settings in memory but could not write state: {e}")),
+                            }
+                            let reset = self.config_reset;
+                            self.config_target = None;
+                            self.rows_dirty = true;
+                            if row.patched && row.render_exe.is_some() {
+                                self.do_patch(&row, reset);
+                            } else {
+                                self.log("Settings will be applied the next time this game is patched.".into());
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.config_target = None;
+                        }
+                    });
+                }
+            });
     }
 }
 
