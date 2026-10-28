@@ -3017,6 +3017,13 @@ mod tests {
         assert_eq!(effective_settings(custom.clone(), Some("0.4.1")), custom);
     }
 
+    #[test]
+    fn multiplier_label_maps_generated_frames_to_multipliers() {
+        assert_eq!(multiplier_label(1), "2X");
+        assert_eq!(multiplier_label(3), "4X");
+        assert_eq!(multiplier_label(5), "6X");
+    }
+
     /// Only the app-data `files/` folder is trusted; an exe-dir or CWD copy could
     /// be planted by anything that can write there.
     #[test]
