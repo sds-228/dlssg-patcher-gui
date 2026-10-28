@@ -5,11 +5,13 @@ use std::time::Duration;
 
 use eframe::egui;
 
-use crate::download::{check_for_update, ensure_mod_files, version_cmp, ModFiles, UpdateInfo};
+use crate::download::{
+    check_for_update, ensure_mod_files, ensure_sr_files, version_cmp, ModFiles, UpdateInfo,
+};
 use crate::gpu::{driver_note, query_gpu, Arch, GpuInfo};
 use crate::manifest::{
     exe_key, find_manifest_game, find_manifest_game_by_appid, load_manifest_reporting, load_state,
-    save_state, ManualGame, Manifest, ManifestGame, PatchRecord, State,
+    save_state, ManualGame, Manifest, ManifestGame, ModSettings, PatchRecord, State,
 };
 use crate::patcher::{self, InstallRequest};
 use crate::anticheat;
@@ -365,6 +367,47 @@ impl SortMode {
 }
 
 impl DlssgApp {
+    fn migrate_settings(&mut self) {
+        // Collect everything up front so the loop body can log and mutate freely.
+        let items: Vec<(String, String, String)> = self
+            .state
+            .patches
+            .iter()
+            .map(|rec| (rec.install_dir.clone(), rec.render_exe.clone(), rec.game_name.clone()))
+            .collect();
+        let mut imports: Vec<(String, ModSettings)> = Vec::new();
+        for (key, exe, game) in items {
+            let Some(ini) = Path::new(&exe)
+                .parent()
+                .map(|d| d.join(crate::download::INI_NAME))
+            else {
+                continue;
+            };
+            let text = std::fs::read_to_string(&ini).ok();
+            let has_marker = text.as_deref().is_some_and(patcher::is_our_ini_text);
+            if !should_migrate(self.state.mod_settings_for(&key).is_some(), has_marker) {
+                continue;
+            }
+            let (settings, notes) = patcher::settings_from_ini(text.as_deref().unwrap_or(""));
+            for n in notes {
+                self.log(format!("{game}: {n}"));
+            }
+            if settings != ModSettings::default() {
+                imports.push((key, settings));
+            }
+        }
+        let mut changed = false;
+        for (key, settings) in imports {
+            self.state.set_mod_settings(&key, settings);
+            changed = true;
+        }
+        if changed {
+            if let Err(e) = save_state(&self.state) {
+                self.log(format!("Imported mod settings but could not save state: {e}"));
+            }
+        }
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
         let state_dir = match crate::manifest::state_dir() {
@@ -422,6 +465,7 @@ impl DlssgApp {
         if let Some(w) = state_warning {
             app.log(w);
         }
+        app.migrate_settings();
         app.refresh_gpu();
         app.refresh_files(false);
         app.scan_games();
@@ -645,6 +689,7 @@ impl DlssgApp {
                             .unwrap_or_default();
                         let iv = rec.mod_version.clone().unwrap_or_else(|| "unknown".to_string());
                         let proxy_dll = rec.proxy_dll.clone();
+                        let sr_installed = rec.sr_installed;
                         let files = rec
                             .installed_files
                             .iter()
@@ -652,7 +697,10 @@ impl DlssgApp {
                             .collect::<Vec<_>>()
                             .join(" and ");
                         self.log(format!("Placed {files}"));
-                        self.log(format!("Patched {name} with DLSSG v{iv} ({proxy_dll} + dlssg_sm86)"));
+                        let sr = if sr_installed { " + SR files" } else { "" };
+                        self.log(format!(
+                            "Patched {name} with DLSSG v{iv} ({proxy_dll} + dlssg_sm86{sr})"
+                        ));
                     }
                     if let Err(e) = save_state(&self.state) {
                         self.log(format!("Patched {name} but failed to save state: {e}"));
@@ -1156,7 +1204,7 @@ impl eframe::App for DlssgApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if add_toned_button(ui, BtnTone::AccentFill, "Patch anyway", None).clicked() {
                             self.patch_confirm = None;
-                            self.do_patch(&row);
+                            self.do_patch(&row, false);
                         }
                         if ui.button("Cancel").clicked() {
                             self.patch_confirm = None;
@@ -2084,7 +2132,7 @@ impl DlssgApp {
                                         if row.anti_cheat.is_detected() {
                                             self.patch_confirm = Some(row);
                                         } else {
-                                            self.do_patch(&row);
+                                            self.do_patch(&row, false);
                                         }
                                     }
                                     GameAction::SetProxy(idx, p) => {
@@ -2230,7 +2278,7 @@ impl DlssgApp {
         }
     }
 
-    fn do_patch(&mut self, row: &Row) {
+    fn do_patch(&mut self, row: &Row, reset_to_factory: bool) {
         let Some(exe) = &row.render_exe else { return };
         let Some(router) = self.router() else { return };
         match &self.files {
@@ -2250,6 +2298,32 @@ impl DlssgApp {
         };
         let using = mod_version.clone().unwrap_or_else(|| "unknown".to_string());
         self.log(format!("Patching {} ({}) with DLSSG v{using}…", row.name, row.proxy));
+        // Log before spawning when a version change forces a template rebuild.
+        if let Some(prev) = self.state.patch_for_exe(&exe.to_string_lossy()) {
+            let changed = match (&prev.mod_version, &mod_version) {
+                (Some(old), Some(new)) => old != new,
+                _ => true,
+            };
+            if changed {
+                self.log(format!(
+                    "Mod version changed ({} -> {}); rebuilding {}'s INI from the new template.",
+                    prev.mod_version.as_deref().unwrap_or("unknown"),
+                    mod_version.as_deref().unwrap_or("unknown"),
+                    row.name
+                ));
+            }
+        }
+        let settings = effective_settings(
+            self.state
+                .mod_settings_for(&row.install_dir.to_string_lossy())
+                .cloned()
+                .unwrap_or_default(),
+            mod_version.as_deref(),
+        );
+        let sr = settings.install_sr;
+        let cache_root = self.cache_root.clone();
+        let local_dirs = self.local_dirs.clone();
+        let tx = self.tx.clone();
         let req = InstallRequest {
             game_name: row.name.clone(),
             install_dir: row.install_dir.clone(),
@@ -2258,16 +2332,28 @@ impl DlssgApp {
             router: router.to_string(),
             cache_dir: self.cache_root.join("cache"),
             state_dir: self.state_dir.clone(),
-            mod_version,
+            mod_version: mod_version.clone(),
             previous_record: self.state.patch_for_exe(&exe.to_string_lossy()).cloned(),
-            // Task 7 replaces these with the per-game settings and SR pre-step.
-            settings: Default::default(),
-            sr: false,
-            reset_to_factory: false,
+            settings,
+            sr,
+            reset_to_factory,
         };
-        self.spawn(move || match patcher::install(&req) {
-            Ok(rec) => Msg::Patched(Box::new(rec)),
-            Err(e) => Msg::Failed(format!("patch {}: {e}", req.game_name)),
+        self.spawn(move || {
+            if sr {
+                let progress = Box::new(move |line: String| {
+                    let _ = tx.send(Msg::Progress(line));
+                });
+                if let Err(e) = ensure_sr_files(&cache_root, &local_dirs, Some(progress)) {
+                    return Msg::Failed(format!(
+                        "download Super Resolution files for {}: {e}",
+                        req.game_name
+                    ));
+                }
+            }
+            match patcher::install(&req) {
+                Ok(rec) => Msg::Patched(Box::new(rec)),
+                Err(e) => Msg::Failed(format!("patch {}: {e}", req.game_name)),
+            }
         });
     }
 
@@ -2881,9 +2967,55 @@ fn default_proxy() -> String {
     "version.dll".to_string()
 }
 
+/// Import settings from an existing INI exactly once per game, and only when the
+/// INI is one we wrote.
+pub(crate) fn should_migrate(has_entry: bool, ini_has_marker: bool) -> bool {
+    !has_entry && ini_has_marker
+}
+
+/// Settings only unlock for a cached bundle 0.4.1 or newer.
+pub(crate) fn config_locked(version: Option<&str>) -> bool {
+    match version {
+        Some(v) => version_cmp(v, "0.4.1") == std::cmp::Ordering::Less,
+        None => true,
+    }
+}
+
+/// What a patch may actually write: factory settings on an old bundle, so a
+/// 0.4.0 template never receives 0.4.1-only keys.
+pub(crate) fn effective_settings(settings: ModSettings, version: Option<&str>) -> ModSettings {
+    if config_locked(version) {
+        ModSettings::default()
+    } else {
+        settings
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_only_runs_once_per_game_and_only_for_our_ini() {
+        assert!(should_migrate(false, true));
+        assert!(!should_migrate(true, true));
+        assert!(!should_migrate(false, false));
+    }
+
+    #[test]
+    fn config_locked_only_for_older_bundles() {
+        assert!(config_locked(None));
+        assert!(config_locked(Some("0.4.0")));
+        assert!(!config_locked(Some("0.4.1")));
+        assert!(!config_locked(Some("0.5.0")));
+    }
+
+    #[test]
+    fn old_bundles_patch_with_factory_settings() {
+        let custom = ModSettings { engine: Some("XeSS".into()), ..Default::default() };
+        assert_eq!(effective_settings(custom.clone(), Some("0.4.0")), ModSettings::default());
+        assert_eq!(effective_settings(custom.clone(), Some("0.4.1")), custom);
+    }
 
     /// Only the app-data `files/` folder is trusted; an exe-dir or CWD copy could
     /// be planted by anything that can write there.
