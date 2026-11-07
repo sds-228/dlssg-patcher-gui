@@ -8,12 +8,13 @@ A lightweight GUI for [dlssg_for_sm86](https://github.com/sdli1995/dlssg_for_sm8
 
 ## What it does
 
-- Downloads and caches the latest mod release (`version.dll`, alternative proxies, `dlssg_sm86.ini`, and the `dlssg_sm86` runtime folder)
-- GPU & driver detection (RTX 20-series SM75 / RTX 30-series SM86)
+- Downloads and caches the latest mod release (`version.dll`, alternative proxies, `dlssg_sm86.ini`, and the `dlssg_sm86` runtime folder; optional Super Resolution payload fetched on demand per game)
+- GPU & driver detection (RTX 20-series SM75 / RTX 30-series SM86) with driver-floor guidance (R535+ for 30-series, R580+ for 20-series)
 - Scans Steam, Epic, GOG, Ubisoft, and EA libraries + manual game folders
 - Checks whether a game supports Frame Generation (via NVIDIA's catalog or `nvngx_dlssg.dll` next to the `.exe`)
-- One-click patch, unpatch, and repatch (upgrades older `0.3.x` patches to `0.4.0+` and backs up original game DLLs)
-- Global and per-game proxy DLL selector 
+- One-click patch, unpatch, and repatch (upgrades older patches and backs up original game DLLs)
+- Per-game **Config** (⚙): Engine (DLSS/XeSS), multiplier, DLSS Preset/Optimized, XeSS flow/HUDless options, and Super Resolution mode — applied on next patch/repatch; defaults keep the same one-click behavior as before
+- Global and per-game proxy DLL selector
 - Anti-cheat detection, warning before patching
 - Eraser: unpatches every game, restores any original files, and deletes all tool data in one click
 
