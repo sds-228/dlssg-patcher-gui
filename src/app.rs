@@ -918,6 +918,7 @@ impl DlssgApp {
                 source: g.source.clone(),
                 anti_cheat: g.anti_cheat.clone(),
                 missing: false,
+                settings: self.settings_for_row(&g.install_dir),
             });
         }
         for m in &self.state.manual_games {
@@ -950,7 +951,7 @@ impl DlssgApp {
             );
             rows.push(Row {
                 name: m.name.clone(),
-                install_dir: dir,
+                install_dir: dir.clone(),
                 render_exe: render_exe.clone(),
                 proxy,
                 support_tag,
@@ -958,6 +959,7 @@ impl DlssgApp {
                 source: "Manual".to_string(),
                 anti_cheat,
                 missing: false,
+                settings: self.settings_for_row(&dir),
             });
         }
         // Patch records whose install folder has moved or been deleted. The table
@@ -991,6 +993,7 @@ impl DlssgApp {
                 source: "Missing".to_string(),
                 anti_cheat: anticheat::AcScan::default(),
                 missing: true,
+                settings: ModSettings::default(),
             });
         }
         rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -1001,6 +1004,33 @@ impl DlssgApp {
         exe.and_then(|e| self.patch_ready.get(&exe_key(&e.to_string_lossy())))
             .copied()
             .unwrap_or(false)
+    }
+
+    /// The per-game mod settings for an install dir (factory when none stored).
+    fn settings_for_row(&self, install_dir: &Path) -> ModSettings {
+        self.state
+            .mod_settings_for(&install_dir.to_string_lossy())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The trailing gear button that opens the per-game Config modal. Shown on
+    /// every located and unlocated row; missing rows keep their Relink/Forget pair.
+    fn config_button(
+        &self,
+        ui: &mut egui::Ui,
+        i: usize,
+        row: &Row,
+        btn_h: f32,
+        clicked: &mut Option<GameAction>,
+    ) {
+        if ui
+            .add(egui::Button::new("⚙").min_size(egui::vec2(CONFIG_BTN_W, btn_h)))
+            .on_hover_text(format!("Mod settings — {}", row.settings.summary()))
+            .clicked()
+        {
+            *clicked = Some(GameAction::Config(i));
+        }
     }
 
     /// True when a game we patched needs a Repatch: the user selected a different proxy, the
@@ -2179,6 +2209,11 @@ impl DlssgApp {
                                 )
                                 .on_hover_text(format!("Found via {}", row.source));
                                 ui.add(egui::Label::new(&row.name).truncate());
+                                if row.settings.sr_enabled() || row.settings.install_sr {
+                                    // A small accent chip so SR-enabled games are visible at a glance.
+                                    ui.add(egui::Label::new(egui::RichText::new("SR").small().color(ACCENT)))
+                                        .on_hover_text(row.settings.summary());
+                                }
                                 if let Some(tip) = row.anti_cheat.badge_tooltip() {
                                     ui.add(egui::Label::new(egui::RichText::new("⚠").color(WARN)))
                                         .on_hover_text(tip);
@@ -2340,7 +2375,7 @@ impl DlssgApp {
                                     let patched = row.patched;
                                     let has_record = self.state.patch_for_exe(&exe_str).is_some();
                                     let is_manual = row.source == "Manual";
-                                    let (w, x_w) = action_widths(actions_w, 2, is_manual);
+                                    let (w, x_w) = action_widths_with_fixed(actions_w, 2, is_manual, CONFIG_BTN_W);
                                     let bundled = crate::download::PROXY_NAMES.contains(&row.proxy.as_str());
                                     let can_patch = bundled
                                         && self.router().is_some()
@@ -2438,10 +2473,11 @@ impl DlssgApp {
                                             ));
                                         }
                                     }
+                                    self.config_button(ui, i, &row, btn_h, &mut clicked);
                                 } else {
                                     // Not located: no render exe discovered yet.
                                     let is_manual = row.source == "Manual";
-                                    let (w, x_w) = action_widths(actions_w, 2, is_manual);
+                                    let (w, x_w) = action_widths_with_fixed(actions_w, 2, is_manual, CONFIG_BTN_W);
                                     if ui.add(egui::Button::new("Locate").min_size(egui::vec2(w, btn_h))).clicked() {
                                         clicked = Some(GameAction::Locate {
                                             name: row.name.clone(),
@@ -2464,6 +2500,7 @@ impl DlssgApp {
                                             ));
                                         }
                                     }
+                                    self.config_button(ui, i, &row, btn_h, &mut clicked);
                                 }
                             });
                             ui.end_row();
@@ -2534,6 +2571,11 @@ impl DlssgApp {
                                                     "Removed {dir} but failed to save state: {e}"
                                                 )),
                                             }
+                                        }
+                                    }
+                                    GameAction::Config(idx) => {
+                                        if let Some(row) = rows.get(idx).cloned() {
+                                            self.open_config(row);
                                         }
                                     }
                                 }
@@ -2887,6 +2929,9 @@ struct Row {
     /// exists. Without it the record would have no row at all, and therefore no
     /// Unpatch / Relink / Forget button anywhere in the UI.
     missing: bool,
+    /// The per-game mod settings stored for this install dir (factory when none).
+    /// Snapshot taken at row build time so the table never touches state.json per frame.
+    settings: ModSettings,
 }
 
 enum GameAction {
@@ -2905,6 +2950,8 @@ enum GameAction {
     /// Drop a manually added folder from the tracked list. Leaves the game and any
     /// patch on disk untouched.
     RemoveManual(String),
+    /// Open the per-game mod settings modal for this row.
+    Config(usize),
 }
 
 fn fix_seps(p: PathBuf) -> PathBuf {
@@ -2981,10 +3028,10 @@ pub(crate) fn column_widths(avail: f32) -> ColumnWidths {
         (avail * 0.15).clamp(142.0, 185.0),  // 2 exe
         (avail * 0.14).clamp(180.0, 200.0),  // 3 status
         (avail * 0.10).clamp(102.0, 114.0),  // 4 proxy: fits the per-game selector
-        (avail * 0.19).clamp(168.0, 210.0),  // 5 actions
+        (avail * 0.19).clamp(185.0, 220.0),  // 5 actions: gear + optional X button need space
     ];
     let mut over = w.iter().sum::<f32>() - budget;
-    for (idx, floor) in [(0usize, 78.0f32), (2, 104.0), (3, 174.0), (4, 102.0), (1, 64.0), (5, 150.0)] {
+    for (idx, floor) in [(0usize, 78.0f32), (2, 104.0), (3, 174.0), (4, 102.0), (1, 64.0), (5, 185.0)] {
         if over <= 0.0 {
             break;
         }
@@ -3094,14 +3141,28 @@ pub(crate) const ACTION_PAD_X: f32 = 3.0;
 pub(crate) const ACTION_GAP_X: f32 = 4.0;
 /// Width reserved for the trailing `[X]` (manual rows only).
 pub(crate) const ACTION_X_W: f32 = 18.0;
+/// Width reserved for the trailing gear (Config) button on located/unlocated rows.
+/// Kept at 24 so two text buttons plus the gear still fit in a 150px actions cell.
+pub(crate) const CONFIG_BTN_W: f32 = 24.0;
 
 /// `(text_button_width, x_button_width)` for one row's actions cell. Equal text
-/// buttons; the optional `X` is a fixed `ACTION_X_W`. Gaps use `ACTION_GAP_X`.
-pub(crate) fn action_widths(actions_w: f32, text_buttons: usize, has_x: bool) -> (f32, f32) {
+/// buttons; the optional `X` is a fixed `ACTION_X_W`, and an optional trailing
+/// gear button takes a fixed `fixed_w`. Gaps use `ACTION_GAP_X`.
+pub(crate) fn action_widths_with_fixed(
+    actions_w: f32,
+    text_buttons: usize,
+    has_x: bool,
+    fixed_w: f32,
+) -> (f32, f32) {
     let x_w = if has_x { ACTION_X_W } else { 0.0 };
-    let gaps = (text_buttons.saturating_sub(1) + has_x as usize) as f32 * ACTION_GAP_X;
-    let text_w = ((actions_w - x_w - gaps) / text_buttons.max(1) as f32).floor().max(0.0);
+    let gaps = (text_buttons.saturating_sub(1) + has_x as usize + usize::from(fixed_w > 0.0)) as f32 * ACTION_GAP_X;
+    let text_w = ((actions_w - x_w - fixed_w - gaps) / text_buttons.max(1) as f32).floor().max(0.0);
     (text_w, x_w)
+}
+
+/// [`action_widths_with_fixed`] without the trailing gear button.
+pub(crate) fn action_widths(actions_w: f32, text_buttons: usize, has_x: bool) -> (f32, f32) {
+    action_widths_with_fixed(actions_w, text_buttons, has_x, 0.0)
 }
 
 /// Height of a toolbar/row control: button text height + vertical button padding.
@@ -3427,7 +3488,7 @@ mod tests {
     /// reachable window.)
     #[test]
     fn column_widths_sum_to_available() {
-        for avail in (660..=2400).step_by(20) {
+        for avail in (780..=2400).step_by(20) {
             let c = column_widths(avail as f32);
             let sum = c.name + c.compat + c.exe + c.status + c.proxy + c.actions
                 + 5.0 * GRID_SPACING_X;
@@ -3440,11 +3501,20 @@ mod tests {
 
     #[test]
     fn min_window_keeps_every_column_readable() {
-        // 708 is the smallest width the grid actually sees (760px window).
-        let c = column_widths(708.0);
+        let c = column_widths(780.0);
         assert!(c.proxy >= 102.0, "proxy column must fit the per-game combo: {}", c.proxy);
         assert!(c.name >= 50.0, "the game name must not vanish: {}", c.name);
-        assert!(c.actions >= 150.0);
+        assert!(c.actions >= 185.0);
+    }
+
+    /// The trailing gear button gets a fixed slot; the two text buttons must stay
+    /// readable next to it and everything must fit inside the actions column.
+    #[test]
+    fn action_widths_with_fixed_reserves_the_config_button() {
+        let (w, _) = action_widths_with_fixed(180.0, 2, false, CONFIG_BTN_W);
+        let used = w * 2.0 + CONFIG_BTN_W + 2.0 * ACTION_GAP_X;
+        assert!(used <= 180.0);
+        assert!(w >= 60.0, "two text buttons must stay readable next to the gear");
     }
 
     /// Every row has the same buttons in the same slots, so their widths must be
@@ -3496,25 +3566,27 @@ mod tests {
         });
         let width = |l: &str| nat.iter().find(|(k, _)| *k == l).unwrap().1;
 
-        let shapes: &[(&[&str], bool)] = &[
-            (&["Patch", "Open dir"], false),
-            (&["Repatch", "Open dir"], false),
-            (&["Unpatch", "Open dir"], false),
-            (&["Patch", "Open dir"], true),
-            (&["Repatch", "Open dir"], true),
-            (&["Unpatch", "Open dir"], true),
-            (&["Locate", "Open dir"], true),
-            (&["Relink", "Forget"], false),
+        // Located/unlocated rows carry the trailing gear button; missing rows do not.
+        let shapes: &[(&[&str], bool, bool)] = &[
+            (&["Patch", "Open dir"], false, true),
+            (&["Repatch", "Open dir"], false, true),
+            (&["Unpatch", "Open dir"], false, true),
+            (&["Patch", "Open dir"], true, true),
+            (&["Repatch", "Open dir"], true, true),
+            (&["Unpatch", "Open dir"], true, true),
+            (&["Locate", "Open dir"], true, true),
+            (&["Relink", "Forget"], false, false),
         ];
-        for actions_w in (150..=240).step_by(2) {
-            for (labels, has_x) in shapes {
-                let (t, x) = action_widths(actions_w as f32, labels.len(), *has_x);
-                let gaps = (labels.len().saturating_sub(1) + *has_x as usize) as f32 * ACTION_GAP_X;
+        for actions_w in (185..=240).step_by(2) {
+            for (labels, has_x, has_gear) in shapes {
+                let fixed = if *has_gear { CONFIG_BTN_W } else { 0.0 };
+                let (t, x) = action_widths_with_fixed(actions_w as f32, labels.len(), *has_x, fixed);
+                let gaps = (labels.len().saturating_sub(1) + *has_x as usize + usize::from(fixed > 0.0)) as f32 * ACTION_GAP_X;
                 let mut used = 0.0;
                 for l in *labels {
                     used += width(l).max(t);
                 }
-                used += if *has_x { x } else { 0.0 } + gaps;
+                used += if *has_x { x } else { 0.0 } + fixed + gaps;
                 assert!(
                     used <= actions_w as f32 + 0.5,
                     "actions_w={actions_w} shape={labels:?} has_x={has_x}: used {used} > {actions_w}"

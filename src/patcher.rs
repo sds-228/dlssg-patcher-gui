@@ -891,7 +891,8 @@ mod tests {
             format!("{}\n{INI_MARKER}\n", template.trim_end()),
             "ini must be the factory template + marker, nothing appended"
         );
-        assert_eq!(ini.matches("[Compatibility]").count(), 1, "no duplicate [Compatibility] section");
+        let compat_headers = ini.lines().filter(|l| l.trim() == "[Compatibility]").count();
+        assert_eq!(compat_headers, 1, "no duplicate [Compatibility] section");
         assert!(!ini.contains("Router="), "no Router= line may be added");
         assert_eq!(rec.router, "SM86", "detected arch still recorded for display");
 
@@ -950,7 +951,9 @@ mod tests {
             format!("{}\n{INI_MARKER}\n", ini_bundle.trim_end()),
             "factory INI must be shipped verbatim (no Router= rewrite / duplicate [Compatibility])"
         );
-        assert_eq!(ini_txt.matches("[Compatibility]").count(), 1, "damage from an appended [Compatibility] section");
+        let compat_headers = ini_txt.lines().filter(|l| l.trim() == "[Compatibility]").count();
+        let tpl_compat = ini_bundle.lines().filter(|l| l.trim() == "[Compatibility]").count();
+        assert_eq!(compat_headers, tpl_compat, "damage from an appended [Compatibility] section");
         assert!(ini_txt.contains(INI_MARKER), "ini must carry our marker");
 
         // Sizes should match the real bundle.
