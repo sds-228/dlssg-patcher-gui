@@ -30,6 +30,10 @@ A lightweight GUI for [dlssg_for_sm86](https://github.com/sdli1995/dlssg_for_sm8
 - [Coldwood1026](https://github.com/Coldwood1026/dlssg_for_sm75) for RTX 20-series (SM75) support
 - The executable statically links third-party Rust crates under their respective MIT / Apache-2.0 licenses.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT License — see [LICENSE](LICENSE). The upstream mod is downloaded at runtime and governed by its own license.
