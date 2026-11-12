@@ -2621,7 +2621,12 @@ impl DlssgApp {
                     _ => None,
                 };
                 let applied = r.settings.clone().unwrap_or_default();
-                let custom = applied != ModSettings::default();
+                let applied_behavior = {
+                    let mut s = applied.clone();
+                    s.install_sr = false;
+                    s
+                };
+                let custom = applied_behavior != ModSettings::default();
                 let sr = r.sr_installed;
                 let profile_suffix = match (custom, sr) {
                     (true, true) => " \u{b7} [C+SR]",
@@ -2629,31 +2634,45 @@ impl DlssgApp {
                     (false, true) => " \u{b7} [SR]",
                     (false, false) => "",
                 };
-                let applied_tip = if custom || sr {
-                    let mut t = format!("Applied settings: {}", applied.summary());
-                    if sr {
-                        t.push_str(" (SR payload installed)");
-                    }
-                    // Warn if the user saved different settings than what's on disk.
-                    let saved = self.settings_for_row(&row.install_dir);
-                    if saved != applied {
-                        t.push_str("\nSaved settings differ from this patch. Click Repatch to apply them.");
+
+                // Compare saved intent vs applied; ignore install_sr-only differences since
+                // SR payload state is tracked separately (sr_installed / [SR]).
+                let saved = self.settings_for_row(&row.install_dir);
+                let saved_behavior = {
+                    let mut s = saved.clone();
+                    s.install_sr = false;
+                    s
+                };
+                let pending = saved_behavior != applied_behavior || (saved.install_sr && !sr);
+
+                let applied_tip = {
+                    let mut t = if custom || sr {
+                        let mut t = format!("Applied settings: {}", applied.summary());
+                        if sr {
+                            t.push_str(" (SR payload installed)");
+                        }
+                        t
+                    } else {
+                        "Applied settings: factory defaults".to_string()
+                    };
+                    if pending {
+                        if saved_behavior == applied_behavior && saved.install_sr && !sr {
+                            t.push_str("\nSR payload is requested but not installed. Click Repatch to install it.");
+                        } else if saved == ModSettings::default() && applied_behavior == ModSettings::default() {
+                            t.push_str("\nSaved settings differ from this patch. Click Repatch to apply them.");
+                        } else {
+                            t.push_str(&format!(
+                                "\nSaved settings ({}) differ from this patch. Click Repatch to apply them.",
+                                saved.summary()
+                            ));
+                        }
                     }
                     Some(t)
-                } else {
-                    let saved = self.settings_for_row(&row.install_dir);
-                    if saved != ModSettings::default() {
-                        Some(format!(
-                            "Applied settings: factory defaults\nSaved settings ({}) differ from this patch. Click Repatch to apply them.",
-                            saved.summary()
-                        ))
-                    } else {
-                        Some("Applied settings: factory defaults".to_string())
-                    }
                 };
 
                 if r.proxy_dll != row.proxy {
                     let tip = applied_tip
+                        .as_ref()
                         .map(|t| format!("Click Repatch to switch to the selected proxy DLL.\n{t}"))
                         .unwrap_or_else(|| "Click Repatch to switch to the selected proxy DLL.".to_string());
                     status_label(
@@ -2666,6 +2685,7 @@ impl DlssgApp {
                     let old = r.mod_version.as_deref().unwrap_or("unknown");
                     let new = cached.unwrap_or("latest");
                     let tip = applied_tip
+                        .as_ref()
                         .map(|t| format!("Outdated patch on disk. Click Repatch to upgrade.\n{t}"))
                         .unwrap_or_else(|| "Outdated patch on disk. Click Repatch to upgrade.".to_string());
                     status_label(
@@ -2674,18 +2694,7 @@ impl DlssgApp {
                         Some(&tip),
                     );
                 } else {
-                    // If saved settings differ from applied, nudge to repatch but keep status clear.
-                    let saved = self.settings_for_row(&row.install_dir);
-                    let pending = saved != applied;
-                    let (color, tip) = if pending {
-                        let mut t = applied_tip.clone().unwrap_or_default();
-                        if t.is_empty() {
-                            t = "Saved settings differ from this patch. Click Repatch to apply them.".to_string();
-                        }
-                        (WARN, Some(t))
-                    } else {
-                        (SUCCESS, applied_tip)
-                    };
+                    let (color, tip) = if pending { (WARN, applied_tip) } else { (SUCCESS, applied_tip) };
                     match r.mod_version.as_deref() {
                         Some(v) => status_label(ui, color, format!("Patched ({} \u{b7} v{v}{profile_suffix})", r.router), tip.as_deref()),
                         None => status_label(ui, color, format!("Patched ({}{profile_suffix})", r.router), tip.as_deref()),
