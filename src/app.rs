@@ -1568,7 +1568,9 @@ impl DlssgApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if add_toned_button(ui, BtnTone::AccentFill, "Apply", None).clicked() {
                             let key = row.install_dir.to_string_lossy().to_string();
-                            if self.config_draft == ModSettings::default() {
+                            let reset = self.config_reset || self.config_draft == ModSettings::default();
+                            if reset {
+                                self.config_draft = ModSettings::default();
                                 self.state.clear_mod_settings(&key);
                             } else {
                                 self.state.set_mod_settings(&key, self.config_draft.clone());
@@ -1577,8 +1579,8 @@ impl DlssgApp {
                                 Ok(_) => self.log(format!("Saved mod settings for {}", row.name)),
                                 Err(e) => self.log(format!("Saved settings in memory but could not write state: {e}")),
                             }
-                            let reset = self.config_reset;
                             self.config_target = None;
+                            self.config_reset = false;
                             self.rows_dirty = true;
                             if row.patched && row.render_exe.is_some() {
                                 self.do_patch(&row, reset);
