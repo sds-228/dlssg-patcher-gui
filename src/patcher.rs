@@ -353,6 +353,14 @@ pub fn install(req: &InstallRequest) -> Result<PatchRecord, String> {
         ));
     }
 
+    // When resetting to factory, the applied profile is factory defaults regardless
+    // of the input settings; record what actually landed in the INI.
+    let recorded_settings = if req.reset_to_factory {
+        ModSettings::default()
+    } else {
+        settings
+    };
+
     Ok(PatchRecord {
         game_name: req.game_name.clone(),
         install_dir: req.install_dir.to_string_lossy().to_string(),
@@ -364,7 +372,7 @@ pub fn install(req: &InstallRequest) -> Result<PatchRecord, String> {
         installed_at_unix: unix_seconds(),
         proxy_sha256: proxy_sha,
         mod_version: req.mod_version.clone(),
-        settings: Some(settings),
+        settings: Some(recorded_settings),
         sr_installed: sr,
     })
 }

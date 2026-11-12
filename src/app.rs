@@ -2755,14 +2755,17 @@ impl DlssgApp {
                 ));
             }
         }
-        let settings = effective_settings(
+        let mut settings = effective_settings(
             self.state
                 .mod_settings_for(&row.install_dir.to_string_lossy())
                 .cloned()
                 .unwrap_or_default(),
             mod_version.as_deref(),
         );
-        let sr = settings.install_sr;
+        if reset_to_factory {
+            settings = ModSettings::default();
+        }
+        let sr = settings.install_sr || settings.sr_enabled();
         let cache_root = self.cache_root.clone();
         let local_dirs = self.local_dirs.clone();
         let tx = self.tx.clone();
