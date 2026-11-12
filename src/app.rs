@@ -2624,9 +2624,9 @@ impl DlssgApp {
                 let custom = applied != ModSettings::default();
                 let sr = r.sr_installed;
                 let profile_suffix = match (custom, sr) {
-                    (true, true) => " \u{b7} Custom+SR",
-                    (true, false) => " \u{b7} Custom",
-                    (false, true) => " \u{b7} SR",
+                    (true, true) => " \u{b7} [C+SR]",
+                    (true, false) => " \u{b7} [C]",
+                    (false, true) => " \u{b7} [SR]",
                     (false, false) => "",
                 };
                 let applied_tip = if custom || sr {
