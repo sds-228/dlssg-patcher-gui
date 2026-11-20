@@ -353,9 +353,9 @@ pub fn install(req: &InstallRequest) -> Result<PatchRecord, String> {
         ));
     }
 
-    // When resetting to factory, the applied profile is factory defaults regardless
-    // of the input settings; record what actually landed in the INI.
-    let recorded_settings = if req.reset_to_factory {
+    // When resetting to factory, or when settings are equivalent to factory defaults,
+    // record the applied profile as factory so it is not flagged as custom.
+    let recorded_settings = if req.reset_to_factory || settings.is_factory() {
         ModSettings::default()
     } else {
         settings

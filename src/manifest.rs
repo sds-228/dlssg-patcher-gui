@@ -254,6 +254,39 @@ impl ModSettings {
             .is_some_and(|m| !m.eq_ignore_ascii_case("Off"))
     }
 
+    /// True when every managed value matches the upstream factory defaults (and no SR
+    /// payload is requested). Treating this as "no custom settings" avoids persisting or
+    /// flagging an explicit factory template as custom.
+    pub fn is_factory(&self) -> bool {
+        self.engine
+            .as_deref()
+            .unwrap_or("DLSS")
+            .eq_ignore_ascii_case("DLSS")
+            && self.max_generated_frames.unwrap_or(3) == 3
+            && self
+                .preset
+                .as_deref()
+                .unwrap_or("A")
+                .eq_ignore_ascii_case("A")
+            && self.optimized.unwrap_or(1) == 1
+            && self
+                .sr_mode
+                .as_deref()
+                .unwrap_or("Off")
+                .eq_ignore_ascii_case("Off")
+            && self
+                .flow_resolution
+                .as_deref()
+                .unwrap_or("Middle")
+                .eq_ignore_ascii_case("Middle")
+            && self
+                .use_hudless
+                .as_deref()
+                .unwrap_or("Auto")
+                .eq_ignore_ascii_case("Auto")
+            && !self.install_sr
+    }
+
     /// One-line summary for the row tooltip, e.g. `XeSS · 3X · SR L-INT8`.
     pub fn summary(&self) -> String {
         let mut parts = vec![

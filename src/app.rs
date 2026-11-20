@@ -384,10 +384,25 @@ impl DlssgApp {
             .state
             .patches
             .iter()
-            .map(|rec| (rec.install_dir.clone(), rec.render_exe.clone(), rec.game_name.clone()))
+            .map(|rec| {
+                (
+                    rec.install_dir.clone(),
+                    rec.render_exe.clone(),
+                    rec.game_name.clone(),
+                )
+            })
             .collect();
         let mut imports: Vec<(String, ModSettings)> = Vec::new();
+        let mut clears: Vec<String> = Vec::new();
         for (key, exe, game) in items {
+            // Heal previously persisted factory-equivalent settings so they are not treated
+            // as custom and not needlessly reapplied on patch/repatch.
+            if let Some(saved) = self.state.mod_settings_for(&key) {
+                if saved.is_factory() {
+                    clears.push(key.clone());
+                }
+                continue;
+            }
             let Some(ini) = Path::new(&exe)
                 .parent()
                 .map(|d| d.join(crate::download::INI_NAME))
@@ -396,18 +411,23 @@ impl DlssgApp {
             };
             let text = std::fs::read_to_string(&ini).ok();
             let has_marker = text.as_deref().is_some_and(patcher::is_our_ini_text);
-            if !should_migrate(self.state.mod_settings_for(&key).is_some(), has_marker) {
+            if !should_migrate(false, has_marker) {
                 continue;
             }
             let (settings, notes) = patcher::settings_from_ini(text.as_deref().unwrap_or(""));
             for n in notes {
                 self.log(format!("{game}: {n}"));
             }
-            if settings != ModSettings::default() {
+            if !settings.is_factory() {
                 imports.push((key, settings));
             }
         }
         let mut changed = false;
+        for key in clears {
+            if self.state.clear_mod_settings(&key) {
+                changed = true;
+            }
+        }
         for (key, settings) in imports {
             self.state.set_mod_settings(&key, settings);
             changed = true;
@@ -716,7 +736,7 @@ impl DlssgApp {
                         self.log(format!(
                             "Patched {name} with DLSSG v{iv} ({proxy_dll} + dlssg_sm86{sr})"
                         ));
-                        if applied == ModSettings::default() && !sr_installed {
+                        if applied.is_factory() && !sr_installed {
                             self.log("Applied settings: factory defaults".into());
                         } else {
                             let sr_note = if sr_installed { " (SR payload installed)" } else { "" };
@@ -1568,7 +1588,7 @@ impl DlssgApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if add_toned_button(ui, BtnTone::AccentFill, "Apply", None).clicked() {
                             let key = row.install_dir.to_string_lossy().to_string();
-                            let reset = self.config_reset || self.config_draft == ModSettings::default();
+                            let reset = self.config_reset || self.config_draft.is_factory();
                             if reset {
                                 self.config_draft = ModSettings::default();
                                 self.state.clear_mod_settings(&key);
@@ -2626,7 +2646,7 @@ impl DlssgApp {
                     s.install_sr = false;
                     s
                 };
-                let custom = applied_behavior != ModSettings::default();
+                let custom = !applied_behavior.is_factory();
                 let sr = r.sr_installed;
                 let profile_suffix = match (custom, sr) {
                     (true, true) => " \u{b7} [C+SR]",
@@ -2643,7 +2663,11 @@ impl DlssgApp {
                     s.install_sr = false;
                     s
                 };
-                let pending = saved_behavior != applied_behavior || (saved.install_sr && !sr);
+                let pending = if saved_behavior.is_factory() && applied_behavior.is_factory() {
+                    saved.install_sr && !sr
+                } else {
+                    saved_behavior != applied_behavior || (saved.install_sr && !sr)
+                };
 
                 let applied_tip = {
                     let mut t = if custom || sr {
@@ -2658,7 +2682,7 @@ impl DlssgApp {
                     if pending {
                         if saved_behavior == applied_behavior && saved.install_sr && !sr {
                             t.push_str("\nSR payload is requested but not installed. Click Repatch to install it.");
-                        } else if saved == ModSettings::default() && applied_behavior == ModSettings::default() {
+                        } else if saved.is_factory() && applied_behavior.is_factory() {
                             t.push_str("\nSaved settings differ from this patch. Click Repatch to apply them.");
                         } else {
                             t.push_str(&format!(
@@ -2773,7 +2797,7 @@ impl DlssgApp {
                 .unwrap_or_default(),
             mod_version.as_deref(),
         );
-        if reset_to_factory {
+        if reset_to_factory || settings.is_factory() {
             settings = ModSettings::default();
         }
         let sr = settings.install_sr || settings.sr_enabled();
