@@ -322,6 +322,18 @@ fn canonical(
     }
 }
 
+/// Which upstream mod bundle source to use for on-demand mod-file management.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModChannel {
+    /// The bundle this patcher build supports (pinned/tested). Never auto-upgrades
+    /// to a newer upstream mod release.
+    #[default]
+    Default,
+    /// Latest upstream mod files (may be unsupported/unverified).
+    Unstable,
+}
+
 /// Persistent app state: which games are patched, plus manually added games.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct State {
@@ -342,6 +354,9 @@ pub struct State {
     /// across unpatch so a later repatch reapplies the user's choices.
     #[serde(default)]
     pub mod_settings: std::collections::HashMap<String, ModSettings>,
+    /// Which mod bundle source to use for manual mod-file management.
+    #[serde(default)]
+    pub mod_files_channel: ModChannel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -977,5 +992,20 @@ mod tests {
         // render_exe is absent from generated entries, so it must default rather
         // than fail deserialization.
         assert!(m.games.iter().all(|g| g.render_exe.is_empty()));
+    }
+
+    #[test]
+    fn old_state_json_without_mod_files_channel_defaults_to_default() {
+        let s: State = serde_json::from_str(r#"{"patches":[],"manual_games":[]}"#).unwrap();
+        assert_eq!(s.mod_files_channel, ModChannel::Default);
+    }
+
+    #[test]
+    fn mod_files_channel_round_trips() {
+        let mut s = State::default();
+        s.mod_files_channel = ModChannel::Unstable;
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: State = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.mod_files_channel, ModChannel::Unstable);
     }
 }
