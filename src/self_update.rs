@@ -159,6 +159,135 @@ pub fn download_patcher_update(
     Ok(dest.to_path_buf())
 }
 
+pub fn backup_exe_path(current_exe: &Path) -> PathBuf {
+    let mut name = current_exe
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "dlssg-patcher.exe".into());
+    name.push(".old");
+    current_exe.with_file_name(name)
+}
+
+/// Pure-ish preflight for apply decisions. `can_replace` indicates whether the
+/// current install location appears writable/replaceable.
+pub fn preflight_apply(
+    _current_exe: &Path,
+    staged_exe: &Path,
+    can_replace: bool,
+) -> Result<(), String> {
+    if !staged_exe.is_file() {
+        return Err(format!(
+            "Downloaded update not found at {}. Please download the update again.",
+            staged_exe.display()
+        ));
+    }
+    if !can_replace {
+        return Err(format!(
+            "Cannot replace the installed app in this location. The downloaded update is saved at {} — replace the app manually.",
+            staged_exe.display()
+        ));
+    }
+    Ok(())
+}
+
+fn can_replace_in_place(current_exe: &Path) -> bool {
+    let Some(parent) = current_exe.parent() else {
+        return false;
+    };
+    let probe = parent.join(format!(".dlssg-patcher-update-probe-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Best-effort cleanup of leftovers from a previous self-update attempt.
+/// Safe to call on startup; errors are ignored.
+pub fn cleanup_update_leftovers() {
+    let Ok(current) = std::env::current_exe() else {
+        return;
+    };
+    // Remove old renamed exe next to the running binary, if present.
+    let old = backup_exe_path(&current);
+    let _ = std::fs::remove_file(old);
+
+    // Remove stale temp download files in a sibling/common updates folder if the
+    // running exe lives there (best-effort, non-recursive).
+    if let Some(parent) = current.parent() {
+        let updates = parent.join("updates");
+        if updates.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&updates) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("download"))
+                    {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply a previously downloaded patcher update by swapping the current exe and
+/// relaunching. On success this spawns the replacement process and returns `Ok(())`;
+/// the caller should exit the current app. On failure it returns an actionable
+/// error and leaves the current installation usable (manual fallback info included).
+pub fn apply_update_on_restart(staged_exe: &Path) -> Result<(), String> {
+    let current = std::env::current_exe()
+        .map_err(|e| format!("cannot determine current app path: {e}"))?;
+    let can_replace = can_replace_in_place(&current);
+    preflight_apply(&current, staged_exe, can_replace)?;
+
+    let backup = backup_exe_path(&current);
+    let _ = std::fs::remove_file(&backup);
+
+    // Rename running exe aside so we can place the new one at the original path.
+    std::fs::rename(&current, &backup).map_err(|e| {
+        format!(
+            "Cannot replace the installed app in this location ({}). The downloaded update is saved at {} — replace the app manually.",
+            e,
+            staged_exe.display()
+        )
+    })?;
+
+    // Place staged update at the current exe path.
+    let place_result = std::fs::rename(staged_exe, &current).or_else(|_| {
+        std::fs::copy(staged_exe, &current).map(|_| {
+            let _ = std::fs::remove_file(staged_exe);
+        })
+    });
+    if let Err(e) = place_result {
+        // Try to restore the previous exe.
+        let _ = std::fs::rename(&backup, &current);
+        return Err(format!(
+            "Failed to install the downloaded update ({}). The downloaded update is saved at {} — replace the app manually.",
+            e,
+            staged_exe.display()
+        ));
+    }
+
+    // Relaunch the new exe. If spawn fails, keep both files and report fallback.
+    if let Err(e) = std::process::Command::new(&current).spawn() {
+        return Err(format!(
+            "Update installed but failed to restart automatically ({}). Please start the app again from {}.",
+            e,
+            current.display()
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +364,7 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(err.contains("downloaded update") || err.contains("staged"), "{err}");
+        let e = err.to_lowercase();
+        assert!(e.contains("download") || e.contains("staged") || e.contains("not found"), "{err}");
     }
 }

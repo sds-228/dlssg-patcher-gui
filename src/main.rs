@@ -15,6 +15,9 @@ mod winutil;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // Best-effort cleanup of leftovers from a previous self-update (e.g. .old exe).
+    self_update::cleanup_update_leftovers();
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("DLSSG Patcher")
         .with_inner_size([980.0, 660.0])
