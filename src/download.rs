@@ -32,6 +32,69 @@ const PINNED_RELEASE_SHA256: &[(&str, &str)] = &[
     ),
 ];
 
+/// The upstream mod bundle this patcher build supports (pinned/tested).
+pub const SUPPORTED_MOD_VERSION: &str = "0.4.2";
+
+pub fn supported_mod_version() -> &'static str {
+    SUPPORTED_MOD_VERSION
+}
+
+/// How mod files should be ensured/fetched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModEnsureMode {
+    /// Ensure/repair the supported bundle for this build. Never fetch a newer
+    /// upstream mod release.
+    DefaultEnsure,
+    /// Explicit/manual refresh may fetch the latest upstream mod release.
+    UnstableFetchLatest,
+}
+
+/// Planned action for ensuring mod files (pure/testable).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModEnsurePlan {
+    /// Cached files are sufficient for this mode/request.
+    UseCache,
+    /// Fetch/ensure the specific target version.
+    FetchTarget(String),
+    /// Fetch the latest upstream release (explicit unstable refresh).
+    FetchLatest,
+    /// Nothing to do automatically (e.g. unstable startup with incomplete cache).
+    NoAutoFetch,
+}
+
+/// Which version a mode targets when it does not mean "latest upstream".
+pub fn mod_target_version(mode: ModEnsureMode) -> Option<String> {
+    match mode {
+        ModEnsureMode::DefaultEnsure => Some(SUPPORTED_MOD_VERSION.to_string()),
+        ModEnsureMode::UnstableFetchLatest => None,
+    }
+}
+
+/// Decide what to do for a mod-files ensure request without performing network I/O.
+pub fn mod_ensure_plan(cache: &Path, mode: ModEnsureMode, explicit: bool) -> ModEnsurePlan {
+    let complete = cache_is_complete(cache);
+    let cached = cached_mod_version(cache);
+    match mode {
+        ModEnsureMode::DefaultEnsure => {
+            let target = SUPPORTED_MOD_VERSION.to_string();
+            if !explicit && complete && cached.as_deref() == Some(SUPPORTED_MOD_VERSION) {
+                ModEnsurePlan::UseCache
+            } else {
+                ModEnsurePlan::FetchTarget(target)
+            }
+        }
+        ModEnsureMode::UnstableFetchLatest => {
+            if explicit {
+                ModEnsurePlan::FetchLatest
+            } else if complete {
+                ModEnsurePlan::UseCache
+            } else {
+                ModEnsurePlan::NoAutoFetch
+            }
+        }
+    }
+}
+
 /// Lowercase hex SHA-256 of a byte slice.
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -319,6 +382,13 @@ pub struct ModFiles {
     pub version: Option<String>,
     /// Cache dir containing `proxy/<name>.dll`, `dlssg_sm86.ini`, and `dlssg_sm86/`.
     pub cache_dir: PathBuf,
+}
+
+impl ModFiles {
+    /// True if this cached bundle is the supported/pinned bundle for this build.
+    pub fn is_supported_bundle(&self) -> bool {
+        self.version.as_deref() == Some(SUPPORTED_MOD_VERSION)
+    }
 }
 
 /// Path of a proxy DLL inside the repo. Upstream renamed `altnative/` to `alternatives/`
@@ -714,7 +784,7 @@ fn invalidate_stale_sr(cache: &Path) {
 /// True when the cache can patch a game without touching the network: all six proxies,
 /// the INI, and a complete runtime tree. A 0.3.5-era cache fails this by construction,
 /// so an upgrade fetches the 0.4.0 bundle on launch.
-fn cache_is_complete(cache: &Path) -> bool {
+pub fn cache_is_complete(cache: &Path) -> bool {
     let proxy_dir = cache.join("proxy");
     PROXY_NAMES.iter().all(|n| is_usable(&proxy_dir.join(n)))
         && is_usable(&cache.join(INI_NAME))
@@ -722,7 +792,7 @@ fn cache_is_complete(cache: &Path) -> bool {
 }
 
 /// The cached version of an existing bundle: the sidecar first, then the legacy INI header.
-fn cached_mod_version(cache: &Path) -> Option<String> {
+pub fn cached_mod_version(cache: &Path) -> Option<String> {
     read_cached_version(cache).or_else(|| {
         let ini_text = std::fs::read_to_string(cache.join(INI_NAME)).unwrap_or_default();
         parse_version_from_ini(&ini_text)
@@ -774,41 +844,79 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Ensure the complete 0.4.0 bundle is cached: all six proxy DLLs, the INI and the
-/// `dlssg_sm86` runtime tree. Order is the release zip first (the only source of the runtime
-/// tree), then the raw mirror files (GitHub → jsDelivr), then local `files/` folders.
+/// Ensure mod files are cached according to the selected channel/mode.
 ///
-/// `force` re-downloads everything; otherwise a cache that can already patch a game is reused
-/// without any network call. `progress` (if any) is called with status lines while working.
-pub fn ensure_mod_files(
+/// - `ModEnsureMode::DefaultEnsure`: ensure/repair the supported bundle for this build.
+///   Never fetch a newer upstream mod release. Non-explicit calls reuse a complete
+///   supported cache; explicit refresh re-fetches the supported bundle.
+/// - `ModEnsureMode::UnstableFetchLatest`: explicit/manual refresh may fetch the latest
+///   upstream release. Non-explicit calls never auto-fetch/upgrade; they only reuse an
+///   already-complete cache.
+///
+/// `progress` (if any) is called with status lines while working.
+pub fn ensure_mod_files_for(
     cache_root: &Path,
     local_dirs: &[PathBuf],
-    force: bool,
+    mode: ModEnsureMode,
+    explicit: bool,
     progress: Option<Box<dyn Fn(String) + Send>>,
 ) -> Result<ModFiles, String> {
     let cache = cache_root.join("cache");
     let proxy_dir = cache.join("proxy");
-    std::fs::create_dir_all(&proxy_dir).map_err(|e| format!("create {}: {e}", proxy_dir.display()))?;
+    std::fs::create_dir_all(&proxy_dir)
+        .map_err(|e| format!("create {}: {e}", proxy_dir.display()))?;
 
-    // 1. A cache that can already patch a game needs no network at all.
-    if !force && cache_is_complete(&cache) {
-        if let Some(cb) = &progress {
-            cb("Mod files already cached".to_string());
+    match mod_ensure_plan(&cache, mode, explicit) {
+        ModEnsurePlan::UseCache => {
+            if let Some(cb) = &progress {
+                cb("Mod files already cached".to_string());
+            }
+            invalidate_stale_sr(&cache);
+            return Ok(ModFiles {
+                source: FileSource::Cached,
+                version: cached_mod_version(&cache),
+                cache_dir: cache,
+            });
         }
-        invalidate_stale_sr(&cache);
-        return Ok(ModFiles {
-            source: FileSource::Cached,
-            version: cached_mod_version(&cache),
-            cache_dir: cache,
-        });
+        ModEnsurePlan::NoAutoFetch => {
+            if let Some(cb) = &progress {
+                cb("Mod files not refreshed automatically".to_string());
+            }
+            invalidate_stale_sr(&cache);
+            if cache_is_complete(&cache) {
+                return Ok(ModFiles {
+                    source: FileSource::Cached,
+                    version: cached_mod_version(&cache),
+                    cache_dir: cache,
+                });
+            }
+            return Err(
+                "mod files are not cached yet; use Options to download mod files".to_string(),
+            );
+        }
+        ModEnsurePlan::FetchTarget(_) | ModEnsurePlan::FetchLatest => {}
     }
 
-    // The release is resolved ONCE: its tag and its asset URL have to agree, and asking
-    // `/releases/latest` twice (as `resolve_tag` would) can straddle a release. When the
-    // API gave no tag, `resolve_tag` (which may read `main`'s README for a version string
-    // only) is the fallback; the payload bases themselves are always tag-only.
-    let rel = resolve_release();
-    let tag = rel.tag.clone().or_else(resolve_tag);
+    // Resolve the release to fetch from.
+    let (mut rel, explicit_target_version): (ReleaseRef, Option<String>) = match mode {
+        ModEnsureMode::DefaultEnsure => (
+            ReleaseRef {
+                tag: Some(SUPPORTED_MOD_VERSION.to_string()),
+                zip_url: zip_urls(Some(SUPPORTED_MOD_VERSION), Some(SUPPORTED_MOD_VERSION))
+                    .into_iter()
+                    .next(),
+            },
+            Some(SUPPORTED_MOD_VERSION.to_string()),
+        ),
+        ModEnsureMode::UnstableFetchLatest => (resolve_release(), None),
+    };
+
+    let mut tag = rel.tag.clone();
+    if matches!(mode, ModEnsureMode::UnstableFetchLatest) {
+        tag = tag.or_else(resolve_tag);
+        rel.tag = tag.clone();
+    }
+
     let bases = mirror_bases(tag.as_deref());
     if bases.is_empty() {
         if let Some(cb) = &progress {
@@ -824,15 +932,19 @@ pub fn ensure_mod_files(
     let mut from_local = false;
     let mut fetched_from_zip = false;
 
-    // Pick the newest valid version across the README and the resolved release tag
-    // (matching `check_for_update`), so a stale README header on `main` never downgrades
-    // the recorded version of a newer release tag or traps the UI in an update loop.
+    // Pick the version label for what we are fetching.
     let readme_text = fetch_once_from_sources(&bases, "README.en.md", "readme", &progress)
         .ok()
         .map(|b| String::from_utf8_lossy(&b).to_string());
     let readme_version = readme_text.as_deref().and_then(parse_version_from_readme);
-    let tag_version = rel.tag.as_deref().map(|t| t.trim_start_matches('v').to_string());
-    let resolved_version = newest_version(&[readme_version, tag_version]);
+    let tag_version = rel
+        .tag
+        .as_deref()
+        .map(|t| t.trim_start_matches('v').to_string());
+    let resolved_version = match mode {
+        ModEnsureMode::DefaultEnsure => explicit_target_version.clone(),
+        ModEnsureMode::UnstableFetchLatest => newest_version(&[readme_version, tag_version]),
+    };
     let version_from_readme_or_tag: Option<&str> = resolved_version.as_deref();
 
     // 2. The release zip first: it is the only source of the runtime tree.
@@ -889,7 +1001,8 @@ pub fn ensure_mod_files(
     if !is_usable(&cache_ini) {
         match fetch_from_sources(&bases, ini_rel(), INI_NAME, &progress) {
             Ok(bytes) => {
-                std::fs::write(&cache_ini, &bytes).map_err(|e| format!("write {}: {e}", cache_ini.display()))?;
+                std::fs::write(&cache_ini, &bytes)
+                    .map_err(|e| format!("write {}: {e}", cache_ini.display()))?;
                 downloaded.insert(INI_NAME.to_string(), bytes.len());
             }
             Err(e) => eprintln!("[dlssg-patcher] mirror fetch failed for {INI_NAME}: {e}"),
@@ -903,7 +1016,10 @@ pub fn ensure_mod_files(
             match std::fs::read(&zip_path) {
                 Ok(bytes) => match extract_release_zip(&bytes, &cache, false) {
                     Ok(_) => from_local = true,
-                    Err(e) => eprintln!("[dlssg-patcher] local zip extract failed {}: {e}", zip_path.display()),
+                    Err(e) => eprintln!(
+                        "[dlssg-patcher] local zip extract failed {}: {e}",
+                        zip_path.display()
+                    ),
                 },
                 Err(e) => eprintln!("[dlssg-patcher] read {}: {e}", zip_path.display()),
             }
@@ -940,14 +1056,20 @@ pub fn ensure_mod_files(
         }
     }
 
-    // 5. Version sidecar. The upstream INI dropped its "; Native x.y.z" header, so the local
-    // version is kept in a small sidecar (version.txt) that survives refreshes. version.txt is
-    // the source of truth: it is rewritten from the README (or the tag) on any refresh, while
-    // the cached INI may still carry an old "; Native x.y.z" header from a previous snapshot.
+    // 5. Version sidecar. For Default, record the supported bundle version (do not let
+    // stale upstream metadata label it as a different release). For Unstable, record the
+    // resolved/latest version when known.
     let mut version = cached_mod_version(&cache);
-    if !downloaded.is_empty() || fetched_from_zip || (force && from_local) {
-        if let Some(v) = version_from_readme_or_tag {
-            version = Some(v.to_string());
+    match mode {
+        ModEnsureMode::DefaultEnsure => {
+            version = explicit_target_version.or(Some(SUPPORTED_MOD_VERSION.to_string()));
+        }
+        ModEnsureMode::UnstableFetchLatest => {
+            if !downloaded.is_empty() || fetched_from_zip || from_local || explicit {
+                if let Some(v) = version_from_readme_or_tag {
+                    version = Some(v.to_string());
+                }
+            }
         }
     }
     if let Some(v) = version.as_deref() {
@@ -964,10 +1086,7 @@ pub fn ensure_mod_files(
         }
     }
 
-    // 6. Report exactly what is absent, so the UI names the missing piece instead of
-    // "missing: ". The runtime tree cannot come from the repo mirrors: the payload files are
-    // tag-only and `sr/` is release-zip only, so if it is gone the cache stays incomplete and
-    // says so, loudly.
+    // 6. Report exactly what is absent.
     let mut missing = Vec::new();
     for name in PROXY_NAMES {
         if !is_usable(&proxy_dir.join(name)) {
@@ -995,7 +1114,10 @@ pub fn ensure_mod_files(
     };
 
     if let Some(cb) = &progress {
-        cb(format!("Total: {} file(s) fetched", downloaded.len() + usize::from(fetched_from_zip)));
+        cb(format!(
+            "Total: {} file(s) fetched",
+            downloaded.len() + usize::from(fetched_from_zip)
+        ));
     }
 
     invalidate_stale_sr(&cache);
@@ -1004,6 +1126,24 @@ pub fn ensure_mod_files(
         version,
         cache_dir: cache,
     })
+}
+
+/// Backwards-compatible wrapper used by existing callers. This preserves legacy
+/// behavior: `force` performs an explicit refresh (may fetch latest upstream),
+/// `!force` reuses a complete cache without auto-upgrading.
+pub fn ensure_mod_files(
+    cache_root: &Path,
+    local_dirs: &[PathBuf],
+    force: bool,
+    progress: Option<Box<dyn Fn(String) + Send>>,
+) -> Result<ModFiles, String> {
+    ensure_mod_files_for(
+        cache_root,
+        local_dirs,
+        ModEnsureMode::UnstableFetchLatest,
+        force,
+        progress,
+    )
 }
 
 /// Fetch the optional Super Resolution payload for the bundle already in the
@@ -1695,6 +1835,78 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("cap"), "the cap must be named: {err}");
         holder.join().unwrap();
+    }
+
+    fn write_complete_cache(cache: &Path, version: &str) {
+        std::fs::create_dir_all(cache.join("proxy")).unwrap();
+        for n in PROXY_NAMES {
+            std::fs::write(cache.join("proxy").join(n), pe_bytes(4096)).unwrap();
+        }
+        std::fs::write(cache.join(INI_NAME), b"x".repeat(4096)).unwrap();
+        for rel in RUNTIME_REQUIRED {
+            let p = cache.join(RUNTIME_DIR_NAME).join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, pe_bytes(4096)).unwrap();
+        }
+        write_cached_version(cache, version);
+    }
+
+    #[test]
+    fn supported_mod_version_is_pinned() {
+        assert_eq!(supported_mod_version(), "0.4.2");
+        assert!(is_pinned_version(SUPPORTED_MOD_VERSION));
+        assert!(is_pinned_version(supported_mod_version()));
+    }
+
+    #[test]
+    fn default_ensure_targets_supported_bundle_not_latest() {
+        assert_eq!(
+            mod_target_version(ModEnsureMode::DefaultEnsure),
+            Some(SUPPORTED_MOD_VERSION.to_string())
+        );
+    }
+
+    #[test]
+    fn unstable_fetch_targets_latest_upstream() {
+        assert_eq!(mod_target_version(ModEnsureMode::UnstableFetchLatest), None);
+    }
+
+    #[test]
+    fn default_ensure_can_reuse_complete_supported_cache_without_network() {
+        let cache = tmp();
+        write_complete_cache(&cache, SUPPORTED_MOD_VERSION);
+        assert_eq!(
+            mod_ensure_plan(&cache, ModEnsureMode::DefaultEnsure, false),
+            ModEnsurePlan::UseCache
+        );
+    }
+
+    #[test]
+    fn default_ensure_retargets_to_supported_even_when_cache_is_newer() {
+        let cache = tmp();
+        write_complete_cache(&cache, "9.9.9");
+        assert_eq!(
+            mod_ensure_plan(&cache, ModEnsureMode::DefaultEnsure, false),
+            ModEnsurePlan::FetchTarget(SUPPORTED_MOD_VERSION.to_string())
+        );
+    }
+
+    #[test]
+    fn unstable_startup_does_not_auto_fetch_when_cache_incomplete() {
+        let cache = tmp();
+        assert_eq!(
+            mod_ensure_plan(&cache, ModEnsureMode::UnstableFetchLatest, false),
+            ModEnsurePlan::NoAutoFetch
+        );
+    }
+
+    #[test]
+    fn unstable_explicit_refresh_fetches_latest() {
+        let cache = tmp();
+        assert_eq!(
+            mod_ensure_plan(&cache, ModEnsureMode::UnstableFetchLatest, true),
+            ModEnsurePlan::FetchLatest
+        );
     }
 }
 
