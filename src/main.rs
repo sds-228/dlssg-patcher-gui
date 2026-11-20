@@ -8,6 +8,7 @@ mod launchers;
 mod manifest;
 mod modini;
 mod patcher;
+mod self_update;
 mod steam;
 mod winutil;
 
