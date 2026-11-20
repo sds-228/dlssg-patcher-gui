@@ -6,17 +6,18 @@ use std::time::Duration;
 use eframe::egui;
 
 use crate::download::{
-    check_for_update, ensure_mod_files, ensure_sr_files, version_cmp, ModFiles, UpdateInfo,
+    ensure_mod_files_for, ensure_sr_files, version_cmp, ModEnsureMode, ModFiles,
 };
 use crate::gpu::{driver_note, query_gpu, Arch, GpuInfo};
 use crate::manifest::{
     exe_key, find_manifest_game, find_manifest_game_by_appid, load_manifest_reporting, load_state,
-    save_state, ManualGame, Manifest, ManifestGame, MAX_MULTIPLIER, ModSettings, PatchRecord, State,
-    XESS_MAX_MULTIPLIER,
+    save_state, ManualGame, Manifest, ManifestGame, ModChannel, ModSettings, PatchRecord, State,
+    MAX_MULTIPLIER, XESS_MAX_MULTIPLIER,
 };
 use crate::patcher::{self, InstallRequest};
 use crate::anticheat;
 use crate::launchers;
+use crate::self_update::{self, PatcherRelease, PatcherUpdateStatus};
 use crate::steam::{autodetect_render_exe, has_any_exe, InstalledGame};
 
 // ---- theme palette ----
@@ -297,7 +298,8 @@ pub enum Msg {
     Unpatched(String, String, patcher::UninstallReport), // (render_exe, game_name, report)
     Erased(Result<String, String>, bool),
     Failed(String),
-    Update(Box<Result<UpdateInfo, String>>),
+    PatcherUpdateChecked(Result<PatcherUpdateStatus, String>),
+    PatcherUpdateDownloaded(Result<(PatcherRelease, PathBuf), String>),
 }
 
 pub struct DlssgApp {
@@ -307,7 +309,11 @@ pub struct DlssgApp {
 
     gpu: Option<Result<GpuInfo, String>>,
     files: Option<Result<ModFiles, String>>,
-    update: Option<Result<UpdateInfo, String>>,
+    patcher_update_check: Option<Result<PatcherUpdateStatus, String>>,
+    patcher_update_checking: bool,
+    patcher_update_downloading: bool,
+    staged_patcher_update: Option<(PatcherRelease, PathBuf)>,
+    apply_update_error: Option<String>,
     scanned: Vec<InstalledGame>,
     scan_progress: Option<f32>,
 
@@ -329,6 +335,8 @@ pub struct DlssgApp {
     /// Whether the "About" credits modal is open, which keeps the upstream
     /// credits out of the header so it stays a compact single line.
     show_about: bool,
+    /// Whether the Options modal is open.
+    show_options: bool,
     /// Set when the user hits Patch on a game with a detected anti-cheat, so the
     /// install only proceeds after an explicit "Patch anyway".
     patch_confirm: Option<Row>,
@@ -467,7 +475,11 @@ impl DlssgApp {
             local_dirs,
             gpu: None,
             files: None,
-            update: None,
+            patcher_update_check: None,
+            patcher_update_checking: false,
+            patcher_update_downloading: false,
+            staged_patcher_update: None,
+            apply_update_error: None,
             scanned: Vec::new(),
             scan_progress: None,
             manifest,
@@ -483,6 +495,7 @@ impl DlssgApp {
             show_log: false,
             eraser_confirm: false,
             show_about: false,
+            show_options: false,
             patch_confirm: None,
             config_target: None,
             config_draft: ModSettings::default(),
@@ -501,9 +514,9 @@ impl DlssgApp {
         }
         app.migrate_settings();
         app.refresh_gpu();
-        app.refresh_files(false);
+        app.refresh_mod_files(false);
         app.scan_games();
-        app.check_for_updates();
+        app.check_patcher_update(false);
         app
     }
 
@@ -527,13 +540,28 @@ impl DlssgApp {
         });
     }
 
+    fn busy(&self) -> bool {
+        self.busy_tasks > 0
+    }
+
     fn refresh_gpu(&mut self) {
         self.log("Querying GPU…".into());
         self.spawn(|| Msg::Gpu(Box::new(query_gpu())));
     }
 
-    fn refresh_files(&mut self, force: bool) {
-        self.log(if force { "Refreshing mod files…" } else { "Checking mod files…" }.into());
+    fn refresh_mod_files(&mut self, explicit: bool) {
+        let channel = self.state.mod_files_channel;
+        let mode = match channel {
+            ModChannel::Default => ModEnsureMode::DefaultEnsure,
+            ModChannel::Unstable => ModEnsureMode::UnstableFetchLatest,
+        };
+        let label = match (channel, explicit) {
+            (ModChannel::Default, false) => "Ensuring supported mod files…",
+            (ModChannel::Default, true) => "Refreshing supported mod files…",
+            (ModChannel::Unstable, true) => "Fetching latest upstream mod files (Unstable)…",
+            (ModChannel::Unstable, false) => "Checking cached mod files…",
+        };
+        self.log(label.into());
         let cache_root = self.cache_root.clone();
         let local_dirs = self.local_dirs.clone();
         let tx = self.tx.clone();
@@ -541,7 +569,7 @@ impl DlssgApp {
             let progress = Box::new(move |line: String| {
                 let _ = tx.send(Msg::Progress(line));
             });
-            let result = ensure_mod_files(&cache_root, &local_dirs, force, Some(progress));
+            let result = ensure_mod_files_for(&cache_root, &local_dirs, mode, explicit, Some(progress));
             Msg::Files(Box::new(result))
         });
     }
@@ -609,37 +637,55 @@ impl DlssgApp {
         });
     }
 
-    fn check_for_updates(&mut self) {
-        self.log("Checking upstream for a newer dlssg_for_sm86…".into());
-        self.spawn(|| Msg::Update(Box::new(check_for_update())));
+    fn check_patcher_update(&mut self, log_start: bool) {
+        if self.patcher_update_checking {
+            return;
+        }
+        if log_start {
+            self.log("Checking for a newer DLSSG Patcher release…".into());
+        }
+        self.patcher_update_checking = true;
+        self.spawn(|| Msg::PatcherUpdateChecked(self_update::check_patcher_update()));
     }
 
-    /// Short "vX.Y.Z" chip for the header: green when current, amber when a newer
-    /// upstream version exists, muted while unverified.
+    fn download_patcher_update(&mut self, release: PatcherRelease) {
+        if self.patcher_update_downloading {
+            return;
+        }
+        self.patcher_update_downloading = true;
+        self.apply_update_error = None;
+        let dest = self_update::staged_update_path(&self.cache_root, &release.version);
+        let tx = self.tx.clone();
+        self.log(format!("Downloading DLSSG Patcher v{}…", release.version));
+        self.spawn(move || {
+            let progress = Box::new(move |line: String| {
+                let _ = tx.send(Msg::Progress(line));
+            });
+            let result = self_update::download_patcher_update(&release, &dest, Some(progress))
+                .map(|path| (release, path));
+            Msg::PatcherUpdateDownloaded(result)
+        });
+    }
+
+    /// Status dot for patcher updates in the header (notify-only).
     fn version_dot(&self, ui: &mut egui::Ui) {
-        let local = self
-            .files
-            .as_ref()
-            .and_then(|f| f.as_ref().ok())
-            .and_then(|f| f.version.clone());
-        let (tip, color, show) = match (&self.update, &local) {
-            (Some(Ok(u)), Some(l)) => {
-                if version_cmp(&u.remote_version, l).is_gt() {
-                    (
-                        format!("dlssg_for_sm86: v{l} -> v{} available", u.remote_version),
-                        WARN,
-                        true,
-                    )
-                } else {
-                    (
-                        format!("dlssg_for_sm86: up to date (v{})", u.remote_version),
-                        SUCCESS,
-                        true,
-                    )
-                }
-            }
-            (_, Some(l)) => (format!("dlssg_for_sm86 v{l}"), MUTED, true),
-            _ => (String::new(), MUTED, false),
+        let (tip, color, show) = match &self.patcher_update_check {
+            Some(Ok(PatcherUpdateStatus::Available(r))) => (
+                format!(
+                    "DLSSG Patcher v{} available (current v{})",
+                    r.version,
+                    env!("CARGO_PKG_VERSION")
+                ),
+                WARN,
+                true,
+            ),
+            Some(Ok(PatcherUpdateStatus::UpToDate { .. })) => (
+                format!("DLSSG Patcher up to date (v{})", env!("CARGO_PKG_VERSION")),
+                SUCCESS,
+                true,
+            ),
+            Some(Err(e)) => (format!("Patcher update check failed: {e}"), MUTED, true),
+            None => (String::new(), MUTED, false),
         };
         if !show {
             return;
@@ -792,24 +838,41 @@ impl DlssgApp {
                     self.eraser_confirm = false;
                 }
                 Msg::Failed(e) => self.log(format!("Error: {e}")),
-                Msg::Update(r) => {
-                    let installed = self
-                        .files
-                        .as_ref()
-                        .and_then(|f| f.as_ref().ok())
-                        .and_then(|f| f.version.clone());
-                    let line = match &*r {
-                        Ok(u) => {
-                            let pushed = u.pushed_hours_ago.map(|h| h.to_string()).unwrap_or_else(|| "?".into());
-                            match installed {
-                                Some(ins) => format!("Upstream is at v{} (pushed {pushed}h ago) · installed: v{ins}", u.remote_version),
-                                None => format!("Upstream is at v{} (pushed {pushed}h ago)", u.remote_version),
-                            }
+                Msg::PatcherUpdateChecked(r) => {
+                    self.patcher_update_checking = false;
+                    match &r {
+                        Ok(PatcherUpdateStatus::Available(rel)) => {
+                            self.log(format!(
+                                "DLSSG Patcher update available: v{} (current v{})",
+                                rel.version,
+                                env!("CARGO_PKG_VERSION")
+                            ));
                         }
-                        Err(e) => format!("Update check failed: {e}"),
-                    };
-                    self.log(line);
-                    self.update = Some(*r);
+                        Ok(PatcherUpdateStatus::UpToDate { current }) => {
+                            self.log(format!("DLSSG Patcher is up to date (v{current})"));
+                        }
+                        Err(e) => {
+                            self.log(format!("Patcher update check failed: {e}"));
+                        }
+                    }
+                    self.patcher_update_check = Some(r);
+                }
+                Msg::PatcherUpdateDownloaded(r) => {
+                    self.patcher_update_downloading = false;
+                    match r {
+                        Ok((rel, path)) => {
+                            self.log(format!(
+                                "Downloaded DLSSG Patcher v{} to {}",
+                                rel.version,
+                                path.display()
+                            ));
+                            self.staged_patcher_update = Some((rel, path));
+                        }
+                        Err(e) => {
+                            self.log(format!("Patcher update download failed: {e}"));
+                            self.apply_update_error = Some(e);
+                        }
+                    }
                 }
             }
             self.busy_tasks = (self.busy_tasks - 1).max(0);
@@ -1061,7 +1124,7 @@ impl DlssgApp {
     }
 
     /// True when a game we patched needs a Repatch: the user selected a different proxy, the
-    /// 0.4.0 runtime tree is not on disk (a 0.3.x patch, or a game verify wiped it), or the
+    /// runtime tree is not on disk (a patch or game verify wiped it), or the
     /// cached bundle is newer than the version this game was patched with.
     fn row_needs_update(&self, row: &Row) -> bool {
         if !row.patched {
@@ -1079,6 +1142,41 @@ impl DlssgApp {
             cached,
             rec.mod_version.as_deref(),
         )
+    }
+
+    fn mod_files_channel_label(channel: ModChannel) -> &'static str {
+        match channel {
+            ModChannel::Default => "Default",
+            ModChannel::Unstable => "Unstable",
+        }
+    }
+
+    fn mod_files_status_line(&self) -> (String, egui::Color32) {
+        match &self.files {
+            Some(Ok(f)) => {
+                let ver = f.version.as_deref().unwrap_or("unknown");
+                let (trust, color) = if self.state.mod_files_channel == ModChannel::Default {
+                    if f.is_supported_bundle() {
+                        ("supported for this patcher".to_string(), SUCCESS)
+                    } else {
+                        ("not the supported bundle for this patcher".to_string(), WARN)
+                    }
+                } else if crate::download::is_pinned_version(ver) {
+                    ("latest upstream (pinned)".to_string(), DETECTED)
+                } else {
+                    ("latest upstream (unverified/unsupported)".to_string(), WARN)
+                };
+                let cache = self.cache_root.join("cache");
+                let sr = if crate::download::sr_is_usable(&cache.join(crate::download::RUNTIME_DIR_NAME)) {
+                    ", SR cached"
+                } else {
+                    ""
+                };
+                (format!("v{ver} — {trust} ({}{})", f.source.label(), sr), color)
+            }
+            Some(Err(e)) => (format!("Unavailable: {e}"), ERROR),
+            None => ("Checking mod files…".to_string(), MUTED),
+        }
     }
 }
 
@@ -1099,7 +1197,7 @@ impl eframe::App for DlssgApp {
             .show(ctx, |ui| {
                 self.ui_header(ui);
                 ui.add_space(4.0);
-                self.update_card(ui);
+                self.patcher_update_card(ui);
                 ui.add_space(4.0);
                 self.gpu_card(ui);
             });
@@ -1287,6 +1385,10 @@ impl eframe::App for DlssgApp {
         if let Some(row) = self.config_target.clone() {
             self.config_modal(ctx, row);
         }
+
+        if self.show_options {
+            self.options_modal(ctx);
+        }
     }
 }
 
@@ -1346,13 +1448,13 @@ impl DlssgApp {
                     ui.add_space(10.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
-                            egui::RichText::new("Update mod files to v0.4.1 or newer to configure Engine, Preset and Super Resolution.")
+                            egui::RichText::new("Refresh mod files to v0.4.1 or newer to configure Engine, Preset and Super Resolution.")
                                 .color(MUTED),
                         );
                     });
                     ui.add_space(8.0);
-                    if add_toned_button(ui, BtnTone::AccentFill, "Update mod files", None).clicked() {
-                        self.refresh_files(true);
+                    if add_toned_button(ui, BtnTone::AccentFill, "Refresh mod files", None).clicked() {
+                        self.refresh_mod_files(true);
                     }
                 } else {
                     // Engine
@@ -1687,77 +1789,208 @@ impl DlssgApp {
                 {
                     self.show_about = true;
                 }
+                if ui
+                    .button("Options")
+                    .on_hover_text("Patcher updates and mod file channels")
+                    .clicked()
+                {
+                    self.show_options = true;
+                }
             });
         });
         ui.add_space(4.0);
     }
 
-    fn update_card(&mut self, ui: &mut egui::Ui) {
+    fn patcher_update_card(&mut self, ui: &mut egui::Ui) {
+        let show = self.patcher_update_checking
+            || self.patcher_update_downloading
+            || self.staged_patcher_update.is_some()
+            || self.apply_update_error.is_some()
+            || matches!(
+                self.patcher_update_check,
+                Some(Ok(PatcherUpdateStatus::Available(_))) | Some(Err(_))
+            );
+        if !show {
+            return;
+        }
         card_frame().show(ui, |ui| {
-            let local = self
-                .files
-                .as_ref()
-                .and_then(|f| f.as_ref().ok())
-                .and_then(|f| f.version.clone());
-            let upd = self.update.as_ref().and_then(|r| r.as_ref().ok()).cloned();
             ui.spacing_mut().interact_size.y = row_control_height(ui);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Update (dlssg_for_sm86)").strong().size(15.0));
-                match &self.update {
-                    None => {
-                        ui.spinner();
-                        ui.weak("Checking upstream…");
+                ui.label(egui::RichText::new("Patcher update").strong().size(15.0));
+                match &self.patcher_update_check {
+                    Some(Ok(PatcherUpdateStatus::Available(r))) => {
+                        ui.colored_label(
+                            WARN,
+                            format!("v{} available (current v{})", r.version, env!("CARGO_PKG_VERSION")),
+                        );
                     }
                     Some(Err(e)) => {
-                        ui.colored_label(ERROR, format!("Update check failed: {e}"));
+                        ui.colored_label(ERROR, format!("Check failed: {e}"));
                     }
-                    Some(Ok(_u)) => {
-                        if let Some(u) = &upd {
-                            let pushed = u.pushed_hours_ago.map(|h| format!(" · pushed {h}h ago")).unwrap_or_default();
-                            match &local {
-                                Some(lv) => {
-                                    let ord = version_cmp(&u.remote_version, lv);
-                                    if ord.is_gt() {
-                                        ui.colored_label(WARN, format!("v{lv} -> v{} available{pushed}", u.remote_version));
-                                    } else if ord.is_lt() {
-                                        ui.colored_label(DETECTED, format!("you have v{lv} · upstream is v{}{pushed}", u.remote_version));
-                                    } else {
-                                        ui.colored_label(SUCCESS, format!("up to date (v{}){pushed}", u.remote_version));
-                                    }
-                                }
-                                None => {
-                                    ui.colored_label(MUTED, format!("upstream v{}{pushed}", u.remote_version));
-                                }
-                            }
-                            let is_update = local
-                                .as_ref()
-                                .is_some_and(|lv| version_cmp(&u.remote_version, lv).is_gt());
-                            if is_update && !crate::download::is_pinned_version(&u.remote_version) {
-                                ui.colored_label(WARN, "unverified build").on_hover_text(
-                                    "No pinned SHA-256 exists for this upstream release yet; the download is accepted but cannot be verified.",
-                                );
-                            }
+                    _ => {
+                        if self.patcher_update_checking {
+                            ui.spinner();
+                            ui.weak("Checking…");
                         }
                     }
                 }
+                if self.patcher_update_downloading {
+                    ui.spinner();
+                    ui.weak("Downloading…");
+                }
+                if let Some((rel, _)) = &self.staged_patcher_update {
+                    ui.colored_label(SUCCESS, format!("v{} downloaded — apply on restart", rel.version));
+                }
+                if let Some(e) = &self.apply_update_error {
+                    ui.colored_label(ERROR, e.clone());
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let has_update = match (&upd, &local) {
-                        (Some(u), Some(lv)) => version_cmp(&u.remote_version, lv).is_gt(),
-                        _ => false,
-                    };
-                    if has_update {
-                        let rem = upd.as_ref().map(|u| u.remote_version.clone()).unwrap_or_default();
-                        let label = format!("Update to v{rem}");
-                        if add_toned_button(ui, BtnTone::AccentFill, &label, None).clicked() {
-                            self.refresh_files(true);
+                    let can_apply = self.staged_patcher_update.is_some() && !self.busy();
+                    if add_toned_button(ui, BtnTone::AccentFill, "Apply on restart", None).clicked() && can_apply {
+                        if let Some((_, path)) = self.staged_patcher_update.clone() {
+                            match self_update::apply_update_on_restart(&path) {
+                                Ok(()) => {
+                                    self.log("Restarting to apply the patcher update…".into());
+                                    std::process::exit(0);
+                                }
+                                Err(e) => {
+                                    self.log(format!("Apply update failed: {e}"));
+                                    self.apply_update_error = Some(e);
+                                }
+                            }
                         }
                     }
-                    if ui.button("Check for updates").clicked() {
-                        self.check_for_updates();
+                    let can_download = matches!(self.patcher_update_check, Some(Ok(PatcherUpdateStatus::Available(_))))
+                        && !self.patcher_update_downloading
+                        && self.staged_patcher_update.is_none();
+                    if add_toned_button(ui, BtnTone::AccentFill, "Download update", None).clicked() && can_download {
+                        if let Some(Ok(PatcherUpdateStatus::Available(rel))) = self.patcher_update_check.clone() {
+                            self.download_patcher_update(rel);
+                        }
+                    }
+                    let can_check = !self.patcher_update_checking && !self.busy();
+                    if add_toned_button(ui, BtnTone::DangerOutline, "Check for patcher update", None).clicked() && can_check {
+                        self.check_patcher_update(true);
                     }
                 });
             });
         });
+    }
+
+    fn options_modal(&mut self, ctx: &egui::Context) {
+        egui::Modal::new(egui::Id::new("options_modal"))
+            .backdrop_color(egui::Color32::from_black_alpha(190))
+            .frame(
+                egui::Frame::popup(&ctx.style())
+                    .fill(CARD)
+                    .stroke(egui::Stroke::new(1.0_f32, BORDER))
+                    .inner_margin(egui::Margin::symmetric(18, 14)),
+            )
+            .show(ctx, |ui| {
+                ui.set_max_width(560.0);
+                ui.label(egui::RichText::new("Options").strong().size(16.0).color(TEXT));
+                ui.add_space(10.0);
+
+                ui.label(egui::RichText::new("Patcher self-update").strong().color(TEXT));
+                ui.label(egui::RichText::new("Checks the latest dlssg-patcher-gui release and notifies only. Nothing is downloaded or applied automatically.").color(MUTED));
+                ui.horizontal_wrapped(|ui| {
+                    let status = match &self.patcher_update_check {
+                        Some(Ok(PatcherUpdateStatus::Available(r))) => format!("Update available: v{} (current v{})", r.version, env!("CARGO_PKG_VERSION")),
+                        Some(Ok(PatcherUpdateStatus::UpToDate { current })) => format!("Up to date (v{current})"),
+                        Some(Err(e)) => format!("Check failed: {e}"),
+                        None => "Not checked yet".to_string(),
+                    };
+                    ui.label(egui::RichText::new(status).color(TEXT));
+                });
+                if self.patcher_update_downloading { ui.horizontal(|ui| { ui.spinner(); ui.weak("Downloading update…"); }); }
+                if let Some((rel, path)) = &self.staged_patcher_update {
+                    ui.colored_label(SUCCESS, format!("v{} downloaded: {}", rel.version, path.display()));
+                    ui.label(egui::RichText::new("Apply installs on restart/close-reopen when writable. If replacement is not allowed, keep the downloaded file and update manually.").color(MUTED));
+                }
+                if let Some(e) = &self.apply_update_error { ui.colored_label(ERROR, e.clone()); }
+                ui.horizontal(|ui| {
+                    let can_check = !self.patcher_update_checking && !self.busy();
+                    if add_toned_button(ui, BtnTone::DangerOutline, "Check now", None).clicked() && can_check {
+                        self.check_patcher_update(true);
+                    }
+                    let can_download = matches!(self.patcher_update_check, Some(Ok(PatcherUpdateStatus::Available(_))))
+                        && !self.patcher_update_downloading && self.staged_patcher_update.is_none();
+                    if add_toned_button(ui, BtnTone::AccentFill, "Download update", None).clicked() && can_download {
+                        if let Some(Ok(PatcherUpdateStatus::Available(rel))) = self.patcher_update_check.clone() {
+                            self.download_patcher_update(rel);
+                        }
+                    }
+                    let can_apply = self.staged_patcher_update.is_some() && !self.busy();
+                    if add_toned_button(ui, BtnTone::AccentFill, "Apply on restart", None).clicked() && can_apply {
+                        if let Some((_, path)) = self.staged_patcher_update.clone() {
+                            match self_update::apply_update_on_restart(&path) {
+                                Ok(()) => { self.log("Restarting to apply the patcher update…".into()); std::process::exit(0); }
+                                Err(e) => { self.log(format!("Apply update failed: {e}")); self.apply_update_error = Some(e); }
+                            }
+                        }
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Mod files").strong().color(TEXT));
+                ui.label(egui::RichText::new("Manual/advanced. Mod files never auto-upgrade to newer upstream releases.").color(MUTED));
+
+                let mut channel = self.state.mod_files_channel;
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Channel:").color(MUTED));
+                    egui::ComboBox::from_id_salt("mod_channel_combo")
+                        .selected_text(Self::mod_files_channel_label(channel))
+                        .show_ui(ui, |cb| {
+                            cb.selectable_value(&mut channel, ModChannel::Default, "Default (supported)");
+                            cb.selectable_value(&mut channel, ModChannel::Unstable, "Unstable (latest upstream)");
+                        });
+                });
+                if channel != self.state.mod_files_channel {
+                    self.state.mod_files_channel = channel;
+                    match save_state(&self.state) {
+                        Ok(_) => self.log(format!("Mod files channel set to {}", Self::mod_files_channel_label(channel))),
+                        Err(e) => self.log(format!("Saved channel in memory but could not write state: {e}")),
+                    }
+                }
+                match self.state.mod_files_channel {
+                    ModChannel::Default => {
+                        ui.label(egui::RichText::new(format!(
+                            "Default uses the supported mod bundle for this patcher (v{}). Refresh repairs/verifies this bundle only; it will not upgrade to newer upstream releases.",
+                            crate::download::SUPPORTED_MOD_VERSION
+                        )).color(MUTED));
+                    }
+                    ModChannel::Unstable => {
+                        ui.colored_label(WARN, "Unstable fetches the latest upstream mod files from sdli1995/dlssg_for_sm86 on explicit refresh. They may be unsupported, unverified, or risky for this patcher.");
+                    }
+                }
+
+                let (status, color) = self.mod_files_status_line();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Status:").color(MUTED));
+                    ui.colored_label(color, status);
+                });
+                ui.label(egui::RichText::new("SHA-256 pinning is used when a release hash is known; unpinned/unverified bundles are labeled and never treated as trusted upgrades.").color(MUTED));
+
+                ui.horizontal(|ui| {
+                    let can_refresh = !self.busy();
+                    let refresh_label = match self.state.mod_files_channel {
+                        ModChannel::Default => "Refresh/Repair supported mod files",
+                        ModChannel::Unstable => "Fetch latest upstream mod files (Unstable)",
+                    };
+                    if add_toned_button(ui, BtnTone::AccentFill, refresh_label, None).clicked() && can_refresh {
+                        self.refresh_mod_files(true);
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        self.show_options = false;
+                    }
+                });
+            });
     }
 
     fn gpu_card(&mut self, ui: &mut egui::Ui) {
