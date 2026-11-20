@@ -35,6 +35,7 @@ const PINNED_RELEASE_SHA256: &[(&str, &str)] = &[
 /// The upstream mod bundle this patcher build supports (pinned/tested).
 pub const SUPPORTED_MOD_VERSION: &str = "0.4.2";
 
+#[allow(dead_code)]
 pub fn supported_mod_version() -> &'static str {
     SUPPORTED_MOD_VERSION
 }
@@ -63,6 +64,7 @@ pub enum ModEnsurePlan {
 }
 
 /// Which version a mode targets when it does not mean "latest upstream".
+#[allow(dead_code)]
 pub fn mod_target_version(mode: ModEnsureMode) -> Option<String> {
     match mode {
         ModEnsureMode::DefaultEnsure => Some(SUPPORTED_MOD_VERSION.to_string()),
@@ -647,8 +649,10 @@ fn parse_version_from_readme(text: &str) -> Option<String> {
     })
 }
 
-/// Latest upstream state detected by the update check.
+/// Legacy upstream mod-release update-check state (kept for compatibility; patcher
+/// self-update now handles update notifications).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct UpdateInfo {
     /// Version string implied upstream (e.g. "0.3.0").
     pub remote_version: String,
@@ -682,8 +686,8 @@ fn newest_version(candidates: &[Option<String>]) -> Option<String> {
         .cloned()
 }
 
-/// Check the push date of the upstream repo and the current version on `main`.
-/// Never throws - reachability issues come back as a normal Error.
+/// Legacy upstream mod-release update check (replaced by patcher self-update).
+#[allow(dead_code)]
 pub fn check_for_update() -> Result<UpdateInfo, String> {
     let pushed_hours_ago = repo_pushed_hours_ago();
     // Resolve the tag once so the reported version and the bytes it is read from
@@ -704,6 +708,7 @@ pub fn check_for_update() -> Result<UpdateInfo, String> {
     Ok(UpdateInfo { remote_version, pushed_hours_ago })
 }
 
+#[allow(dead_code)]
 fn repo_pushed_hours_ago() -> Option<u64> {
     let json = fetch_bytes_timeout("https://api.github.com/repos/sdli1995/dlssg_for_sm86", 8, 4).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&json).ok()?;
@@ -717,6 +722,7 @@ fn repo_pushed_hours_ago() -> Option<u64> {
 }
 
 /// Parse an RFC3339 UTC timestamp such as `2026-09-14T12:00:00Z` into unix seconds.
+#[allow(dead_code)]
 fn rfc3339_unix(s: &str) -> Option<u64> {
     let s = s.trim();
     let (date, rest) = s.split_once('T')?;
@@ -736,6 +742,7 @@ fn rfc3339_unix(s: &str) -> Option<u64> {
     Some((days * 86_400 + h * 3_600 + mi * 60 + sec) as u64)
 }
 
+#[allow(dead_code)]
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -1131,6 +1138,7 @@ pub fn ensure_mod_files_for(
 /// Backwards-compatible wrapper used by existing callers. This preserves legacy
 /// behavior: `force` performs an explicit refresh (may fetch latest upstream),
 /// `!force` reuses a complete cache without auto-upgrading.
+#[allow(dead_code)]
 pub fn ensure_mod_files(
     cache_root: &Path,
     local_dirs: &[PathBuf],
