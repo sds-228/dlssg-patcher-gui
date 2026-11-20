@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.3
+
+### Added
+- Patcher self-update: the main **Update** section checks for new `dlssg-patcher-gui` releases, notifies you when an update is available, and lets you download and apply it on restart (no automatic download or install). If in-place replacement is not possible, the downloaded update is kept for manual installation.
+- Mod file version is shown alongside the patcher version in the Update section.
+
+### Changed
+- Mod files are managed as the supported/pinned bundle for this patcher build and are no longer auto-upgraded to newer upstream `dlssg_for_sm86` releases on startup (the supported bundle can still be ensured/repaired as needed).
+- Improved Update and Graphics card status UI with progress bars during checks/refresh and clearer actions.
+
+### Fixed
+- **Open dir** now opens the game folder via Windows Explorer.
+
 ## 2.0.2
 
 ### Fixed
