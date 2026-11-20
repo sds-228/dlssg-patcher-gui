@@ -308,6 +308,7 @@ pub struct DlssgApp {
     local_dirs: Vec<PathBuf>,
 
     gpu: Option<Result<GpuInfo, String>>,
+    gpu_loading: bool,
     files: Option<Result<ModFiles, String>>,
     patcher_update_check: Option<Result<PatcherUpdateStatus, String>>,
     patcher_update_checking: bool,
@@ -335,8 +336,6 @@ pub struct DlssgApp {
     /// Whether the "About" credits modal is open, which keeps the upstream
     /// credits out of the header so it stays a compact single line.
     show_about: bool,
-    /// Whether the Options modal is open.
-    show_options: bool,
     /// Set when the user hits Patch on a game with a detected anti-cheat, so the
     /// install only proceeds after an explicit "Patch anyway".
     patch_confirm: Option<Row>,
@@ -474,6 +473,7 @@ impl DlssgApp {
             cache_root,
             local_dirs,
             gpu: None,
+            gpu_loading: false,
             files: None,
             patcher_update_check: None,
             patcher_update_checking: false,
@@ -495,7 +495,6 @@ impl DlssgApp {
             show_log: false,
             eraser_confirm: false,
             show_about: false,
-            show_options: false,
             patch_confirm: None,
             config_target: None,
             config_draft: ModSettings::default(),
@@ -545,6 +544,10 @@ impl DlssgApp {
     }
 
     fn refresh_gpu(&mut self) {
+        if self.gpu_loading {
+            return;
+        }
+        self.gpu_loading = true;
         self.log("Querying GPU…".into());
         self.spawn(|| Msg::Gpu(Box::new(query_gpu())));
     }
@@ -699,6 +702,7 @@ impl DlssgApp {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Gpu(r) => {
+                    self.gpu_loading = false;
                     match &*r {
                         Ok(g) => {
                             if g.driver.trim().is_empty() {
@@ -1144,40 +1148,6 @@ impl DlssgApp {
         )
     }
 
-    fn mod_files_channel_label(channel: ModChannel) -> &'static str {
-        match channel {
-            ModChannel::Default => "Default",
-            ModChannel::Unstable => "Unstable",
-        }
-    }
-
-    fn mod_files_status_line(&self) -> (String, egui::Color32) {
-        match &self.files {
-            Some(Ok(f)) => {
-                let ver = f.version.as_deref().unwrap_or("unknown");
-                let (trust, color) = if self.state.mod_files_channel == ModChannel::Default {
-                    if f.is_supported_bundle() {
-                        ("supported for this patcher".to_string(), SUCCESS)
-                    } else {
-                        ("not the supported bundle for this patcher".to_string(), WARN)
-                    }
-                } else if crate::download::is_pinned_version(ver) {
-                    ("latest upstream (pinned)".to_string(), DETECTED)
-                } else {
-                    ("latest upstream (unverified/unsupported)".to_string(), WARN)
-                };
-                let cache = self.cache_root.join("cache");
-                let sr = if crate::download::sr_is_usable(&cache.join(crate::download::RUNTIME_DIR_NAME)) {
-                    ", SR cached"
-                } else {
-                    ""
-                };
-                (format!("v{ver} — {trust} ({}{})", f.source.label(), sr), color)
-            }
-            Some(Err(e)) => (format!("Unavailable: {e}"), ERROR),
-            None => ("Checking mod files…".to_string(), MUTED),
-        }
-    }
 }
 
 impl eframe::App for DlssgApp {
@@ -1386,9 +1356,6 @@ impl eframe::App for DlssgApp {
             self.config_modal(ctx, row);
         }
 
-        if self.show_options {
-            self.options_modal(ctx);
-        }
     }
 }
 
@@ -1789,64 +1756,75 @@ impl DlssgApp {
                 {
                     self.show_about = true;
                 }
-                if ui
-                    .button("Options")
-                    .on_hover_text("Patcher updates and mod file channels")
-                    .clicked()
-                {
-                    self.show_options = true;
-                }
             });
         });
         ui.add_space(4.0);
     }
 
     fn patcher_update_card(&mut self, ui: &mut egui::Ui) {
-        let show = self.patcher_update_checking
-            || self.patcher_update_downloading
-            || self.staged_patcher_update.is_some()
-            || self.apply_update_error.is_some()
-            || matches!(
-                self.patcher_update_check,
-                Some(Ok(PatcherUpdateStatus::Available(_))) | Some(Err(_))
-            );
-        if !show {
-            return;
-        }
         card_frame().show(ui, |ui| {
             ui.spacing_mut().interact_size.y = row_control_height(ui);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Patcher update").strong().size(15.0));
+                ui.label(egui::RichText::new("Update").strong().size(15.0));
                 match &self.patcher_update_check {
                     Some(Ok(PatcherUpdateStatus::Available(r))) => {
                         ui.colored_label(
                             WARN,
-                            format!("v{} available (current v{})", r.version, env!("CARGO_PKG_VERSION")),
+                            format!(
+                                "DLSSG Patcher v{} available (current v{})",
+                                r.version,
+                                env!("CARGO_PKG_VERSION")
+                            ),
+                        );
+                    }
+                    Some(Ok(PatcherUpdateStatus::UpToDate { current })) => {
+                        ui.colored_label(
+                            SUCCESS,
+                            format!("DLSSG Patcher up to date (v{current})"),
                         );
                     }
                     Some(Err(e)) => {
-                        ui.colored_label(ERROR, format!("Check failed: {e}"));
+                        ui.colored_label(ERROR, format!("Update check failed: {e}"));
                     }
-                    _ => {
-                        if self.patcher_update_checking {
-                            ui.spinner();
-                            ui.weak("Checking…");
+                    None => {
+                        if !self.patcher_update_checking {
+                            ui.weak(format!(
+                                "DLSSG Patcher v{} (not checked yet)",
+                                env!("CARGO_PKG_VERSION")
+                            ));
                         }
                     }
                 }
+                let mod_version = match &self.files {
+                    Some(Ok(f)) => f.version.as_deref().unwrap_or("unknown").to_string(),
+                    Some(Err(_)) => "unavailable".to_string(),
+                    None => "checking…".to_string(),
+                };
+                ui.label(
+                    egui::RichText::new(format!("Mod files: v{mod_version}"))
+                        .color(MUTED)
+                        .size(13.0),
+                );
                 if self.patcher_update_downloading {
                     ui.spinner();
                     ui.weak("Downloading…");
                 }
                 if let Some((rel, _)) = &self.staged_patcher_update {
-                    ui.colored_label(SUCCESS, format!("v{} downloaded — apply on restart", rel.version));
+                    ui.colored_label(
+                        SUCCESS,
+                        format!("v{} downloaded — apply on restart", rel.version),
+                    );
                 }
                 if let Some(e) = &self.apply_update_error {
                     ui.colored_label(ERROR, e.clone());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let btn_h = row_control_height(ui);
                     let can_apply = self.staged_patcher_update.is_some() && !self.busy();
-                    if add_toned_button(ui, BtnTone::AccentFill, "Apply on restart", None).clicked() && can_apply {
+                    if can_apply
+                        && add_toned_button(ui, BtnTone::AccentFill, "Apply on restart", None)
+                            .clicked()
+                    {
                         if let Some((_, path)) = self.staged_patcher_update.clone() {
                             match self_update::apply_update_on_restart(&path) {
                                 Ok(()) => {
@@ -1860,138 +1838,55 @@ impl DlssgApp {
                             }
                         }
                     }
-                    let can_download = matches!(self.patcher_update_check, Some(Ok(PatcherUpdateStatus::Available(_))))
-                        && !self.patcher_update_downloading
+                    let can_download = matches!(
+                        self.patcher_update_check,
+                        Some(Ok(PatcherUpdateStatus::Available(_)))
+                    ) && !self.patcher_update_downloading
                         && self.staged_patcher_update.is_none();
-                    if add_toned_button(ui, BtnTone::AccentFill, "Download update", None).clicked() && can_download {
-                        if let Some(Ok(PatcherUpdateStatus::Available(rel))) = self.patcher_update_check.clone() {
+                    if can_download
+                        && add_toned_button(ui, BtnTone::AccentFill, "Download update", None)
+                            .clicked()
+                    {
+                        if let Some(Ok(PatcherUpdateStatus::Available(rel))) =
+                            self.patcher_update_check.clone()
+                        {
                             self.download_patcher_update(rel);
                         }
                     }
-                    let can_check = !self.patcher_update_checking && !self.busy();
-                    if add_toned_button(ui, BtnTone::DangerOutline, "Check for patcher update", None).clicked() && can_check {
-                        self.check_patcher_update(true);
+                    if self.patcher_update_checking {
+                        let label = "Check for updates";
+                        let p = (ui.input(|i| i.time) * 0.8).fract() as f32;
+                        let track = ui.visuals().extreme_bg_color;
+                        ui.visuals_mut().extreme_bg_color = CARD;
+                        let bar = ui.add(
+                            egui::ProgressBar::new(p)
+                                .desired_width(toolbar_button_width(ui, label))
+                                .desired_height(btn_h)
+                                .corner_radius(egui::CornerRadius::same(6))
+                                .fill(ACCENT),
+                        );
+                        ui.visuals_mut().extreme_bg_color = track;
+                        ui.painter().rect_stroke(
+                            bar.rect,
+                            egui::CornerRadius::same(6),
+                            egui::Stroke::new(1.0_f32, BORDER),
+                            egui::StrokeKind::Inside,
+                        );
+                        ui.ctx().request_repaint();
+                    } else {
+                        let can_check = !self.patcher_update_checking && !self.busy();
+                        if ui
+                            .add_enabled(can_check, egui::Button::new("Check for updates"))
+                            .clicked()
+                        {
+                            self.check_patcher_update(true);
+                        }
                     }
                 });
             });
         });
     }
 
-    fn options_modal(&mut self, ctx: &egui::Context) {
-        egui::Modal::new(egui::Id::new("options_modal"))
-            .backdrop_color(egui::Color32::from_black_alpha(190))
-            .frame(
-                egui::Frame::popup(&ctx.style())
-                    .fill(CARD)
-                    .stroke(egui::Stroke::new(1.0_f32, BORDER))
-                    .inner_margin(egui::Margin::symmetric(18, 14)),
-            )
-            .show(ctx, |ui| {
-                ui.set_max_width(560.0);
-                ui.label(egui::RichText::new("Options").strong().size(16.0).color(TEXT));
-                ui.add_space(10.0);
-
-                ui.label(egui::RichText::new("Patcher self-update").strong().color(TEXT));
-                ui.label(egui::RichText::new("Checks the latest dlssg-patcher-gui release and notifies only. Nothing is downloaded or applied automatically.").color(MUTED));
-                ui.horizontal_wrapped(|ui| {
-                    let status = match &self.patcher_update_check {
-                        Some(Ok(PatcherUpdateStatus::Available(r))) => format!("Update available: v{} (current v{})", r.version, env!("CARGO_PKG_VERSION")),
-                        Some(Ok(PatcherUpdateStatus::UpToDate { current })) => format!("Up to date (v{current})"),
-                        Some(Err(e)) => format!("Check failed: {e}"),
-                        None => "Not checked yet".to_string(),
-                    };
-                    ui.label(egui::RichText::new(status).color(TEXT));
-                });
-                if self.patcher_update_downloading { ui.horizontal(|ui| { ui.spinner(); ui.weak("Downloading update…"); }); }
-                if let Some((rel, path)) = &self.staged_patcher_update {
-                    ui.colored_label(SUCCESS, format!("v{} downloaded: {}", rel.version, path.display()));
-                    ui.label(egui::RichText::new("Apply installs on restart/close-reopen when writable. If replacement is not allowed, keep the downloaded file and update manually.").color(MUTED));
-                }
-                if let Some(e) = &self.apply_update_error { ui.colored_label(ERROR, e.clone()); }
-                ui.horizontal(|ui| {
-                    let can_check = !self.patcher_update_checking && !self.busy();
-                    if add_toned_button(ui, BtnTone::DangerOutline, "Check now", None).clicked() && can_check {
-                        self.check_patcher_update(true);
-                    }
-                    let can_download = matches!(self.patcher_update_check, Some(Ok(PatcherUpdateStatus::Available(_))))
-                        && !self.patcher_update_downloading && self.staged_patcher_update.is_none();
-                    if add_toned_button(ui, BtnTone::AccentFill, "Download update", None).clicked() && can_download {
-                        if let Some(Ok(PatcherUpdateStatus::Available(rel))) = self.patcher_update_check.clone() {
-                            self.download_patcher_update(rel);
-                        }
-                    }
-                    let can_apply = self.staged_patcher_update.is_some() && !self.busy();
-                    if add_toned_button(ui, BtnTone::AccentFill, "Apply on restart", None).clicked() && can_apply {
-                        if let Some((_, path)) = self.staged_patcher_update.clone() {
-                            match self_update::apply_update_on_restart(&path) {
-                                Ok(()) => { self.log("Restarting to apply the patcher update…".into()); std::process::exit(0); }
-                                Err(e) => { self.log(format!("Apply update failed: {e}")); self.apply_update_error = Some(e); }
-                            }
-                        }
-                    }
-                });
-
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Mod files").strong().color(TEXT));
-                ui.label(egui::RichText::new("Manual/advanced. Mod files never auto-upgrade to newer upstream releases.").color(MUTED));
-
-                let mut channel = self.state.mod_files_channel;
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Channel:").color(MUTED));
-                    egui::ComboBox::from_id_salt("mod_channel_combo")
-                        .selected_text(Self::mod_files_channel_label(channel))
-                        .show_ui(ui, |cb| {
-                            cb.selectable_value(&mut channel, ModChannel::Default, "Default (supported)");
-                            cb.selectable_value(&mut channel, ModChannel::Unstable, "Unstable (latest upstream)");
-                        });
-                });
-                if channel != self.state.mod_files_channel {
-                    self.state.mod_files_channel = channel;
-                    match save_state(&self.state) {
-                        Ok(_) => self.log(format!("Mod files channel set to {}", Self::mod_files_channel_label(channel))),
-                        Err(e) => self.log(format!("Saved channel in memory but could not write state: {e}")),
-                    }
-                }
-                match self.state.mod_files_channel {
-                    ModChannel::Default => {
-                        ui.label(egui::RichText::new(format!(
-                            "Default uses the supported mod bundle for this patcher (v{}). Refresh repairs/verifies this bundle only; it will not upgrade to newer upstream releases.",
-                            crate::download::SUPPORTED_MOD_VERSION
-                        )).color(MUTED));
-                    }
-                    ModChannel::Unstable => {
-                        ui.colored_label(WARN, "Unstable fetches the latest upstream mod files from sdli1995/dlssg_for_sm86 on explicit refresh. They may be unsupported, unverified, or risky for this patcher.");
-                    }
-                }
-
-                let (status, color) = self.mod_files_status_line();
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new("Status:").color(MUTED));
-                    ui.colored_label(color, status);
-                });
-                ui.label(egui::RichText::new("SHA-256 pinning is used when a release hash is known; unpinned/unverified bundles are labeled and never treated as trusted upgrades.").color(MUTED));
-
-                ui.horizontal(|ui| {
-                    let can_refresh = !self.busy();
-                    let refresh_label = match self.state.mod_files_channel {
-                        ModChannel::Default => "Refresh/Repair supported mod files",
-                        ModChannel::Unstable => "Fetch latest upstream mod files (Unstable)",
-                    };
-                    if add_toned_button(ui, BtnTone::AccentFill, refresh_label, None).clicked() && can_refresh {
-                        self.refresh_mod_files(true);
-                    }
-                });
-
-                ui.add_space(12.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
-                        self.show_options = false;
-                    }
-                });
-            });
-    }
 
     fn gpu_card(&mut self, ui: &mut egui::Ui) {
         card_frame().show(ui, |ui| {
@@ -1999,10 +1894,6 @@ impl DlssgApp {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Graphics card").strong().size(15.0));
                 match &self.gpu {
-                    None => {
-                        ui.spinner();
-                        ui.weak("Querying nvidia-smi…");
-                    }
                     Some(Err(e)) => {
                         ui.colored_label(ERROR, "No NVIDIA GPU detected");
                         ui.monospace(egui::RichText::new(e.clone()).color(MUTED));
@@ -2011,27 +1902,65 @@ impl DlssgApp {
                         let arch_label = match g.arch {
                             Arch::Sm86 => "Supported (Ampere SM86)".to_string(),
                             Arch::Sm75 => "Supported (Turing SM75)".to_string(),
-                            Arch::Unsupported => "Unsupported card - targets RTX 20/30 series".to_string(),
+                            Arch::Unsupported => {
+                                "Unsupported card - targets RTX 20/30 series".to_string()
+                            }
                         };
                         if g.from_wmi {
                             let note = match &g.igpu {
                                 Some(igpu) => hybrid_note(igpu),
                                 None => wmi_only_note(),
                             };
-                            ui.colored_label(WARN, format!("{} · {arch_label} · {note}", g.name));
+                            ui.colored_label(WARN, format!("{} - {arch_label} - {note}", g.name));
                         } else {
-                            let vram = g.vram_mib
+                            let vram = g
+                                .vram_mib
                                 .map(|m| format!("{:.0} GB", m as f64 / 1024.0))
                                 .unwrap_or_else(|| "?".into());
-                            ui.colored_label(SUCCESS, format!("{} · {vram} · driver {} · {}", g.name, g.driver, arch_label));
+                            ui.colored_label(
+                                SUCCESS,
+                                format!(
+                                    "{} - {vram} - driver {} - {}",
+                                    g.name, g.driver, arch_label
+                                ),
+                            );
                         }
                         if let Some(note) = driver_note(&g.driver) {
                             ui.colored_label(WARN, note);
                         }
                     }
+                    None => {
+                        if !self.gpu_loading {
+                            ui.weak("GPU not queried yet.");
+                        }
+                    }
+                }
+                if self.gpu_loading && self.gpu.is_some() {
+                    ui.weak("Refreshing...");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Refresh").clicked() {
+                    let btn_h = row_control_height(ui);
+                    if self.gpu_loading {
+                        let label = "Refresh";
+                        let p = (ui.input(|i| i.time) * 0.8).fract() as f32;
+                        let track = ui.visuals().extreme_bg_color;
+                        ui.visuals_mut().extreme_bg_color = CARD;
+                        let bar = ui.add(
+                            egui::ProgressBar::new(p)
+                                .desired_width(toolbar_button_width(ui, label))
+                                .desired_height(btn_h)
+                                .corner_radius(egui::CornerRadius::same(6))
+                                .fill(ACCENT),
+                        );
+                        ui.visuals_mut().extreme_bg_color = track;
+                        ui.painter().rect_stroke(
+                            bar.rect,
+                            egui::CornerRadius::same(6),
+                            egui::Stroke::new(1.0_f32, BORDER),
+                            egui::StrokeKind::Inside,
+                        );
+                        ui.ctx().request_repaint();
+                    } else if ui.button("Refresh").clicked() {
                         self.refresh_gpu();
                     }
                 });
