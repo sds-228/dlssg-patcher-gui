@@ -148,7 +148,7 @@ pub fn find_manifest_game_by_appid<'a>(
     find_manifest_game(manifest, folder_name)
 }
 
-/// Values upstream 0.4.1 accepts for the per-game knobs. Anything else is a
+/// Values upstream 0.4.1+ accepts for the per-game knobs. Anything else is a
 /// 0.4.0-era or hand-edited value and is dropped during normalization.
 pub const ENGINES: &[&str] = &["DLSS", "XeSS"];
 pub const PRESETS: &[&str] = &["A", "B", "C"];
@@ -161,7 +161,7 @@ pub const MAX_MULTIPLIER: u8 = 5;
 /// XeSS-FG tops out at 3 generated frames (4X).
 pub const XESS_MAX_MULTIPLIER: u8 = 3;
 
-/// Per-game configuration for the 0.4.1 knobs. `None` means "factory default"
+/// Per-game configuration for the 0.4.1+ knobs. `None` means "factory default"
 /// for that key: the patcher then leaves the upstream INI value alone.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModSettings {
@@ -178,7 +178,7 @@ pub struct ModSettings {
 }
 
 impl ModSettings {
-    /// Drop values 0.4.1 does not accept and clamp frame counts, reporting each
+    /// Drop values 0.4.1+ does not accept and clamp frame counts, reporting each
     /// change so a migration can be logged rather than silently applied.
     pub fn normalized(mut self) -> (Self, Vec<String>) {
         let mut notes = Vec::new();
@@ -212,7 +212,7 @@ impl ModSettings {
 
         if let Some(n) = self.optimized {
             if n > 3 {
-                notes.push(format!("Optimized={n} is not a 0.4.1 value; ignoring it."));
+                notes.push(format!("Optimized={n} is not a 0.4.1+ value; ignoring it."));
                 self.optimized = None;
             }
         }
@@ -227,7 +227,7 @@ impl ModSettings {
                 }
                 None => {
                     notes.push(format!(
-                        "SuperResolution Mode={mode} is not a 0.4.1 value; ignoring it."
+                        "SuperResolution Mode={mode} is not a 0.4.1+ value; ignoring it."
                     ));
                     self.sr_mode = None;
                 }
@@ -283,7 +283,7 @@ fn canonical(
     match allowed.iter().find(|a| a.eq_ignore_ascii_case(&v)) {
         Some(a) => Some((*a).to_string()),
         None => {
-            notes.push(format!("{label}={v} is not a 0.4.1 value; ignoring it."));
+            notes.push(format!("{label}={v} is not a 0.4.1+ value; ignoring it."));
             None
         }
     }
@@ -305,7 +305,7 @@ pub struct State {
     /// while the folder stays meaningful).
     #[serde(default)]
     pub proxy_overrides: std::collections::HashMap<String, String>,
-    /// Per-game 0.4.1 settings, keyed the same way as `proxy_overrides`. Kept
+    /// Per-game 0.4.1+ settings, keyed the same way as `proxy_overrides`. Kept
     /// across unpatch so a later repatch reapplies the user's choices.
     #[serde(default)]
     pub mod_settings: std::collections::HashMap<String, ModSettings>,

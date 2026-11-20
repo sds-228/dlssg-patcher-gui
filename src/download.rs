@@ -26,6 +26,10 @@ const PINNED_RELEASE_SHA256: &[(&str, &str)] = &[
         "0.4.1",
         "7230131637617ede9dc45c552244ddb814ae70098406e102fc254d52bcdb6e14",
     ),
+    (
+        "0.4.2",
+        "492bbd0c8429af27cf74dabcd51f733c56993d0e2ccf176c503c19ef090b2133",
+    ),
 ];
 
 /// Lowercase hex SHA-256 of a byte slice.
@@ -1283,6 +1287,9 @@ mod tests {
         let h41 = "7230131637617ede9dc45c552244ddb814ae70098406e102fc254d52bcdb6e14";
         assert_eq!(pinned_release_hash(Some("0.4.1")), Some(h41));
         assert_eq!(pinned_release_hash(Some("v0.4.1")), Some(h41));
+        let h42 = "492bbd0c8429af27cf74dabcd51f733c56993d0e2ccf176c503c19ef090b2133";
+        assert_eq!(pinned_release_hash(Some("0.4.2")), Some(h42));
+        assert_eq!(pinned_release_hash(Some("v0.4.2")), Some(h42));
         assert_eq!(pinned_release_hash(Some("9.9.9")), None);
         assert_eq!(pinned_release_hash(None), None);
     }
@@ -1291,7 +1298,9 @@ mod tests {
     fn is_pinned_version_is_true_only_for_known_versions() {
         assert!(is_pinned_version("0.4.1"));
         assert!(is_pinned_version("v0.4.1"));
-        assert!(!is_pinned_version("0.4.2"));
+        assert!(is_pinned_version("0.4.2"));
+        assert!(is_pinned_version("v0.4.2"));
+        assert!(!is_pinned_version("9.9.9"));
         assert!(!is_pinned_version(""));
     }
 

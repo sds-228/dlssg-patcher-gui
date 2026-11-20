@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.1
+
+### Changed
+- Updated mod support to **dlssg_for_sm86 0.4.2** (pinned release asset and SHA-256; same bundle layout as 0.4.1).
+- Config remains available for cached bundles **0.4.1+** (including 0.4.2) with the same per-game settings.
+
+### Fixed
+- Corrected XeSS `UseHudless=Auto` guidance for 0.4.2: `Auto` now behaves the same as `0` (interpolates the whole image, including UI), while `1` still requires a HUD-less image.
+
 ## 0.2.0
 
 ### Added

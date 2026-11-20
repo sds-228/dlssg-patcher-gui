@@ -330,11 +330,11 @@ pub fn driver_major(driver: &str) -> Option<i64> {
     parts.first()?.parse().ok()
 }
 
-/// Soft guidance on the driver version. 0.4.1 hard-refuses anything below R580.
+/// Soft guidance on the driver version. dlssg_for_sm86 0.4.1+ hard-refuses anything below R580.
 pub fn driver_note(driver: &str) -> Option<&'static str> {
     let major = driver_major(driver)?;
     if major < 580 {
-        Some("Driver is below the R580 floor required by dlssg_for_sm86 0.4.1; frame generation will be refused. Update your NVIDIA driver.")
+        Some("Driver is below the R580 floor required by dlssg_for_sm86 0.4.1+; frame generation will be refused. Update your NVIDIA driver.")
     } else if major < 591 {
         Some("Driver meets the R580 floor; dlssg_for_sm86 is validated on 591.86 and newer. Update if you hit issues.")
     } else {

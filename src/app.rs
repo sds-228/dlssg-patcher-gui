@@ -1326,7 +1326,7 @@ impl DlssgApp {
                     ui.add_space(10.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
-                            egui::RichText::new("Update mod files to v0.4.1 to configure Engine, Preset and Super Resolution.")
+                            egui::RichText::new("Update mod files to v0.4.1 or newer to configure Engine, Preset and Super Resolution.")
                                 .color(MUTED),
                         );
                     });
@@ -1556,7 +1556,7 @@ impl DlssgApp {
 
                     if draft.engine.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("XeSS")) ||
                        draft.flow_resolution.is_some() || draft.use_hudless.is_some() {
-                        ui.label(egui::RichText::new("Only applies to the XeSS engine.").color(MUTED).size(11.0));
+                        ui.label(egui::RichText::new("Only applies to the XeSS engine. Auto/0: interpolate the whole image (including UI). 1: require a HUD-less image.").color(MUTED).size(11.0));
                     }
 
                     // Buttons
@@ -3457,7 +3457,7 @@ pub(crate) fn config_locked(version: Option<&str>) -> bool {
 }
 
 /// What a patch may actually write: factory settings on an old bundle, so a
-/// 0.4.0 template never receives 0.4.1-only keys.
+/// 0.4.0 template never receives 0.4.1+ config keys.
 pub(crate) fn effective_settings(settings: ModSettings, version: Option<&str>) -> ModSettings {
     if config_locked(version) {
         ModSettings::default()
@@ -3482,6 +3482,7 @@ mod tests {
         assert!(config_locked(None));
         assert!(config_locked(Some("0.4.0")));
         assert!(!config_locked(Some("0.4.1")));
+        assert!(!config_locked(Some("0.4.2")));
         assert!(!config_locked(Some("0.5.0")));
     }
 
@@ -3490,6 +3491,7 @@ mod tests {
         let custom = ModSettings { engine: Some("XeSS".into()), ..Default::default() };
         assert_eq!(effective_settings(custom.clone(), Some("0.4.0")), ModSettings::default());
         assert_eq!(effective_settings(custom.clone(), Some("0.4.1")), custom);
+        assert_eq!(effective_settings(custom.clone(), Some("0.4.2")), custom);
     }
 
     #[test]

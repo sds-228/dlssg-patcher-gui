@@ -62,7 +62,7 @@ pub fn compose_ini(base: &str, template: &str, settings: &ModSettings, reset: bo
 }
 
 /// Read the managed settings back out of an existing INI, dropping values a
-/// 0.4.1 bundle would not accept (0.4.0-era `Preset=Auto`, `Mode=On`, ...).
+/// 0.4.1+ bundle would not accept (0.4.0-era `Preset=Auto`, `Mode=On`, ...).
 pub fn settings_from_ini(text: &str) -> (ModSettings, Vec<String>) {
     let d = IniDoc::parse(text);
     ModSettings {
@@ -138,7 +138,7 @@ pub struct InstallRequest {
     /// The record this install replaces, if any. Used to carry genuine game-original
     /// backups forward and to clean up a proxy the user just switched away from.
     pub previous_record: Option<PatchRecord>,
-    /// Per-game 0.4.1 settings; normalized by `install` before use.
+    /// Per-game 0.4.1+ settings; normalized by `install` before use.
     pub settings: ModSettings,
     /// Copy the optional `sr/` payload (implied by a non-Off SR mode).
     pub sr: bool,
