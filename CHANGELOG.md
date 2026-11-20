@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.2
+
+### Fixed
+- Fixed factory-equivalent per-game settings being treated as custom, which could show a `[C]` status and reapply custom settings on patch/repatch until Config was reset to factory.
+
 ## 2.0.1
 
 ### Changed
