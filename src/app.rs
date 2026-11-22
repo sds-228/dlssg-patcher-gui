@@ -1167,8 +1167,6 @@ impl eframe::App for DlssgApp {
             .show(ctx, |ui| {
                 self.ui_header(ui);
                 ui.add_space(4.0);
-                self.patcher_update_card(ui);
-                ui.add_space(4.0);
                 self.gpu_card(ui);
             });
         egui::TopBottomPanel::bottom("log")
@@ -1756,137 +1754,117 @@ impl DlssgApp {
                 {
                     self.show_about = true;
                 }
+
+                let update_btn = ui.button("Update");
+                egui::Popup::from_toggle_button_response(&update_btn)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        ui.set_min_width(320.0);
+                        ui.label(egui::RichText::new("Patcher update").strong());
+                        ui.add_space(4.0);
+                        match &self.patcher_update_check {
+                            Some(Ok(PatcherUpdateStatus::Available(r))) => {
+                                ui.colored_label(
+                                    WARN,
+                                    format!(
+                                        "v{} available (current v{})",
+                                        r.version,
+                                        env!("CARGO_PKG_VERSION")
+                                    ),
+                                );
+                            }
+                            Some(Ok(PatcherUpdateStatus::UpToDate { current })) => {
+                                ui.colored_label(SUCCESS, format!("Up to date (v{current})"));
+                            }
+                            Some(Err(e)) => {
+                                ui.colored_label(ERROR, format!("Check failed: {e}"));
+                            }
+                            None => {
+                                if !self.patcher_update_checking {
+                                    ui.weak(format!(
+                                        "Current v{} (not checked yet)",
+                                        env!("CARGO_PKG_VERSION")
+                                    ));
+                                }
+                            }
+                        }
+                        let mod_version = match &self.files {
+                            Some(Ok(f)) => f.version.as_deref().unwrap_or("unknown").to_string(),
+                            Some(Err(_)) => "unavailable".to_string(),
+                            None => "checking…".to_string(),
+                        };
+                        ui.label(
+                            egui::RichText::new(format!("Mod files: v{mod_version}"))
+                                .color(MUTED)
+                                .size(13.0),
+                        );
+                        if self.patcher_update_downloading {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.weak("Downloading…");
+                            });
+                        }
+                        if let Some((rel, _)) = &self.staged_patcher_update {
+                            ui.colored_label(SUCCESS, format!("v{} downloaded", rel.version));
+                        }
+                        if let Some(e) = &self.apply_update_error {
+                            ui.colored_label(ERROR, e.clone());
+                        }
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if self.patcher_update_checking {
+                                ui.add(egui::Spinner::new());
+                                ui.weak("Checking…");
+                            } else if ui
+                                .add_enabled(!self.busy(), egui::Button::new("Check for updates"))
+                                .clicked()
+                            {
+                                self.check_patcher_update(true);
+                            }
+
+                            let can_download = matches!(
+                                self.patcher_update_check,
+                                Some(Ok(PatcherUpdateStatus::Available(_)))
+                            ) && !self.patcher_update_downloading
+                                && self.staged_patcher_update.is_none();
+                            if can_download && ui.button("Download update").clicked() {
+                                if let Some(Ok(PatcherUpdateStatus::Available(rel))) =
+                                    self.patcher_update_check.clone()
+                                {
+                                    self.download_patcher_update(rel);
+                                }
+                            }
+
+                            let can_apply =
+                                self.staged_patcher_update.is_some() && !self.busy();
+                            if can_apply
+                                && add_toned_button(
+                                    ui,
+                                    BtnTone::AccentFill,
+                                    "Restart to update",
+                                    None,
+                                )
+                                .clicked()
+                            {
+                                if let Some((_, path)) = self.staged_patcher_update.clone() {
+                                    match self_update::apply_update_on_restart(&path) {
+                                        Ok(()) => {
+                                            self.log("Restarting to update…".into());
+                                            std::process::exit(0);
+                                        }
+                                        Err(e) => {
+                                            self.log(format!("Update failed: {e}"));
+                                            self.apply_update_error = Some(e);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    });
             });
         });
         ui.add_space(4.0);
     }
-
-    fn patcher_update_card(&mut self, ui: &mut egui::Ui) {
-        card_frame().show(ui, |ui| {
-            ui.spacing_mut().interact_size.y = row_control_height(ui);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Update").strong().size(15.0));
-                match &self.patcher_update_check {
-                    Some(Ok(PatcherUpdateStatus::Available(r))) => {
-                        ui.colored_label(
-                            WARN,
-                            format!(
-                                "DLSSG Patcher v{} available (current v{})",
-                                r.version,
-                                env!("CARGO_PKG_VERSION")
-                            ),
-                        );
-                    }
-                    Some(Ok(PatcherUpdateStatus::UpToDate { current })) => {
-                        ui.colored_label(
-                            SUCCESS,
-                            format!("DLSSG Patcher up to date (v{current})"),
-                        );
-                    }
-                    Some(Err(e)) => {
-                        ui.colored_label(ERROR, format!("Update check failed: {e}"));
-                    }
-                    None => {
-                        if !self.patcher_update_checking {
-                            ui.weak(format!(
-                                "DLSSG Patcher v{} (not checked yet)",
-                                env!("CARGO_PKG_VERSION")
-                            ));
-                        }
-                    }
-                }
-                let mod_version = match &self.files {
-                    Some(Ok(f)) => f.version.as_deref().unwrap_or("unknown").to_string(),
-                    Some(Err(_)) => "unavailable".to_string(),
-                    None => "checking…".to_string(),
-                };
-                ui.label(
-                    egui::RichText::new(format!("Mod files: v{mod_version}"))
-                        .color(MUTED)
-                        .size(13.0),
-                );
-                if self.patcher_update_downloading {
-                    ui.spinner();
-                    ui.weak("Downloading…");
-                }
-                if let Some((rel, _)) = &self.staged_patcher_update {
-                    ui.colored_label(
-                        SUCCESS,
-                        format!("v{} downloaded — apply on restart", rel.version),
-                    );
-                }
-                if let Some(e) = &self.apply_update_error {
-                    ui.colored_label(ERROR, e.clone());
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let btn_h = row_control_height(ui);
-                    let can_apply = self.staged_patcher_update.is_some() && !self.busy();
-                    if can_apply
-                        && add_toned_button(ui, BtnTone::AccentFill, "Apply on restart", None)
-                            .clicked()
-                    {
-                        if let Some((_, path)) = self.staged_patcher_update.clone() {
-                            match self_update::apply_update_on_restart(&path) {
-                                Ok(()) => {
-                                    self.log("Restarting to apply the patcher update…".into());
-                                    std::process::exit(0);
-                                }
-                                Err(e) => {
-                                    self.log(format!("Apply update failed: {e}"));
-                                    self.apply_update_error = Some(e);
-                                }
-                            }
-                        }
-                    }
-                    let can_download = matches!(
-                        self.patcher_update_check,
-                        Some(Ok(PatcherUpdateStatus::Available(_)))
-                    ) && !self.patcher_update_downloading
-                        && self.staged_patcher_update.is_none();
-                    if can_download
-                        && add_toned_button(ui, BtnTone::AccentFill, "Download update", None)
-                            .clicked()
-                    {
-                        if let Some(Ok(PatcherUpdateStatus::Available(rel))) =
-                            self.patcher_update_check.clone()
-                        {
-                            self.download_patcher_update(rel);
-                        }
-                    }
-                    if self.patcher_update_checking {
-                        let label = "Check for updates";
-                        let p = (ui.input(|i| i.time) * 0.8).fract() as f32;
-                        let track = ui.visuals().extreme_bg_color;
-                        ui.visuals_mut().extreme_bg_color = CARD;
-                        let bar = ui.add(
-                            egui::ProgressBar::new(p)
-                                .desired_width(toolbar_button_width(ui, label))
-                                .desired_height(btn_h)
-                                .corner_radius(egui::CornerRadius::same(6))
-                                .fill(ACCENT),
-                        );
-                        ui.visuals_mut().extreme_bg_color = track;
-                        ui.painter().rect_stroke(
-                            bar.rect,
-                            egui::CornerRadius::same(6),
-                            egui::Stroke::new(1.0_f32, BORDER),
-                            egui::StrokeKind::Inside,
-                        );
-                        ui.ctx().request_repaint();
-                    } else {
-                        let can_check = !self.patcher_update_checking && !self.busy();
-                        if ui
-                            .add_enabled(can_check, egui::Button::new("Check for updates"))
-                            .clicked()
-                        {
-                            self.check_patcher_update(true);
-                        }
-                    }
-                });
-            });
-        });
-    }
-
 
     fn gpu_card(&mut self, ui: &mut egui::Ui) {
         card_frame().show(ui, |ui| {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.4
+
+### Fixed
+- Removed the overlapping Update section; patcher updates are now in the **Update** menu (near About) with check/download/restart actions.
+
 ## 2.0.3
 
 ### Added

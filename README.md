@@ -9,7 +9,7 @@ A lightweight GUI for [dlssg_for_sm86](https://github.com/sdli1995/dlssg_for_sm8
 ## What it does
 
 - Downloads and caches the supported `dlssg_for_sm86` mod bundle for this patcher build (`version.dll`, alternative proxies, `dlssg_sm86.ini`, and the `dlssg_sm86` runtime folder), keeps it repaired/verified, and fetches the optional Super Resolution payload on demand per game
-- Patcher self-update: checks for new DLSSG Patcher releases, notifies you in the **Update** section, and lets you download and apply updates on restart (no automatic download or install)
+- Patcher self-update: checks for new DLSSG Patcher releases from the **Update** menu, and lets you download and apply updates on restart (no automatic download or install)
 - GPU & driver detection (RTX 20-series SM75 / RTX 30-series SM86) with driver-floor guidance (R535+ for 30-series, R580+ for 20-series)
 - Scans Steam, Epic, GOG, Ubisoft, and EA libraries + manual game folders
 - Checks whether a game supports Frame Generation (via NVIDIA's catalog or `nvngx_dlssg.dll` next to the `.exe`)
